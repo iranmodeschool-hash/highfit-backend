@@ -9,6 +9,7 @@ const app = express();
 app.use(express.json());
 app.use(cors());
 
+// تنظیمات اتصال به دیتابیس
 const pool = new Pool({
   host: process.env.DB_HOST || 'localhost',
   port: process.env.DB_PORT || 5432,
@@ -18,6 +19,7 @@ const pool = new Pool({
   ssl: process.env.DB_HOST ? false : { rejectUnauthorized: false }
 });
 
+// ساخت جدول کاربران در صورت وجود نداشتن
 const createTable = async () => {
   try {
     await pool.query(`
@@ -38,8 +40,10 @@ const createTable = async () => {
 };
 createTable();
 
+// مسیر تست سرور
 app.get('/', (req, res) => res.send('HighFit Backend is running perfectly!'));
 
+// مسیر ثبت نام
 app.post('/api/register', async (req, res) => {
   const { username, email, password } = req.body;
   try {
@@ -54,6 +58,7 @@ app.post('/api/register', async (req, res) => {
   }
 });
 
+// مسیر ورود
 app.post('/api/login', async (req, res) => {
   const { email, password } = req.body;
   try {
@@ -80,7 +85,6 @@ app.get('/api/setup-admin', async (req, res) => {
   if (!email) return res.status(400).send('Email is required');
   
   try {
-    // چک می‌کنیم آیا از قبل ادمینی وجود دارد یا نه (برای امنیت)
     const adminCheck = await pool.query("SELECT * FROM users WHERE role = 'admin' LIMIT 1");
     if (adminCheck.rows.length > 0) {
       return res.status(403).send('Admin already exists. This route is now locked for security.');
@@ -92,6 +96,16 @@ app.get('/api/setup-admin', async (req, res) => {
     res.send(`Success! User ${email} is now an admin.`);
   } catch (err) {
     res.status(500).send('Error updating user');
+  }
+});
+
+// API جدید: دریافت لیست کاربران برای پنل مدیریت
+app.get('/api/admin/users', async (req, res) => {
+  try {
+    const result = await pool.query('SELECT id, username, email, role, workshop_id, created_at FROM users ORDER BY id DESC');
+    res.json(result.rows);
+  } catch (err) {
+    res.status(500).json({ error: 'Error fetching users' });
   }
 });
 
