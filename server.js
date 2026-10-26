@@ -31,16 +31,33 @@ const createTable = async () => {
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       );
     `);
-    // اضافه کردن ستون workshop_id اگر از قبل وجود نداشت
-    await pool.query(`
-      ALTER TABLE users ADD COLUMN IF NOT EXISTS workshop_id VARCHAR(50);
-    `);
+    await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS workshop_id VARCHAR(50);`);
     console.log("Table 'users' is ready and updated");
   } catch (err) {
     console.error("Error creating table", err);
   }
 };
 createTable();
+
+// --- محافظ امنیتی (فقط ادمین‌ها اجازه عبور دارند) ---
+const authenticateAdmin = (req, res, next) => {
+  const authHeader = req.headers.authorization;
+  if (!authHeader) return res.status(401).json({ error: 'No token provided. Access denied.' });
+
+  const token = authHeader.split(' ')[1];
+  if (!token) return res.status(401).json({ error: 'Invalid token format.' });
+
+  try {
+    const decoded = jwt.verify(token, process.env.JWT_SECRET || 'super-secret-key');
+    if (decoded.role !== 'admin') {
+      return res.status(403).json({ error: 'Access denied. Admin role required.' });
+    }
+    req.user = decoded;
+    next();
+  } catch (err) {
+    res.status(401).json({ error: 'Invalid or expired token.' });
+  }
+};
 
 app.get('/', (req, res) => res.send('HighFit Backend is running perfectly!'));
 
@@ -69,7 +86,6 @@ app.post('/api/login', async (req, res) => {
     if (!validPassword) return res.status(401).json({ error: 'Invalid credentials' });
 
     const userWorkshop = user.workshop_id || 'WS-001';
-
     const token = jwt.sign({ id: user.id, role: user.role, workshop_id: userWorkshop }, process.env.JWT_SECRET || 'super-secret-key', { expiresIn: '1d' });
     res.json({ token, user: { id: user.id, username: user.username, email: user.email, role: user.role, workshop_id: userWorkshop } });
   } catch (err) {
@@ -80,29 +96,45 @@ app.post('/api/login', async (req, res) => {
 app.get('/api/setup-admin', async (req, res) => {
   const { email } = req.query;
   if (!email) return res.status(400).send('Email is required');
-  
   try {
     const adminCheck = await pool.query("SELECT * FROM users WHERE role = 'admin' LIMIT 1");
-    if (adminCheck.rows.length > 0) {
-      return res.status(403).send('Admin already exists. This route is now locked for security.');
-    }
-
+    if (adminCheck.rows.length > 0) return res.status(403).send('Admin already exists.');
     const result = await pool.query("UPDATE users SET role = 'admin' WHERE email = $1 RETURNING *", [email]);
     if (result.rows.length === 0) return res.status(404).send('User not found');
-    
     res.send(`Success! User ${email} is now an admin.`);
   } catch (err) {
     res.status(500).send('Error updating user');
   }
 });
 
-app.get('/api/admin/users', async (req, res) => {
+// لیست کاربران (امن شده)
+app.get('/api/admin/users', authenticateAdmin, async (req, res) => {
   try {
     const result = await pool.query('SELECT id, username, email, role, workshop_id, created_at FROM users ORDER BY id DESC');
     res.json(result.rows);
   } catch (err) {
-    // حالا اگر خطایی رخ دهد، متن دقیق آن را برمی‌گرداند تا ما بفهمیم مشکل چیست
     res.status(500).json({ error: 'Error fetching users', details: err.message });
+  }
+});
+
+// تغییر نقش کاربر (جدید)
+app.put('/api/admin/users/:id/role', authenticateAdmin, async (req, res) => {
+  const { id } = req.params;
+  const { role } = req.body;
+
+  if (!['user', 'manager', 'admin'].includes(role)) {
+    return res.status(400).json({ error: 'Invalid role specified.' });
+  }
+
+  try {
+    const result = await pool.query(
+      'UPDATE users SET role = $1 WHERE id = $2 RETURNING id, username, email, role',
+      [role, id]
+    );
+    if (result.rows.length === 0) return res.status(404).json({ error: 'User not found' });
+    res.json({ message: 'Role updated successfully', user: result.rows[0] });
+  } catch (err) {
+    res.status(500).json({ error: 'Error updating role', details: err.message });
   }
 });
 
