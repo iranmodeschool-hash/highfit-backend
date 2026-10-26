@@ -39,7 +39,7 @@ const createTable = async () => {
 };
 createTable();
 
-// --- محافظ امنیتی (فقط ادمین‌ها اجازه عبور دارند) ---
+// --- محافظ امنیتی (فقط ادمین‌ها) ---
 const authenticateAdmin = (req, res, next) => {
   const authHeader = req.headers.authorization;
   if (!authHeader) return res.status(401).json({ error: 'No token provided. Access denied.' });
@@ -59,8 +59,10 @@ const authenticateAdmin = (req, res, next) => {
   }
 };
 
+// مسیر تست
 app.get('/', (req, res) => res.send('HighFit Backend is running perfectly!'));
 
+// ثبت نام
 app.post('/api/register', async (req, res) => {
   const { username, email, password } = req.body;
   try {
@@ -75,6 +77,7 @@ app.post('/api/register', async (req, res) => {
   }
 });
 
+// ورود
 app.post('/api/login', async (req, res) => {
   const { email, password } = req.body;
   try {
@@ -93,6 +96,7 @@ app.post('/api/login', async (req, res) => {
   }
 });
 
+// لینک جادویی (فقط یک بار کار می‌کند - برای امنیت قفل می‌شود)
 app.get('/api/setup-admin', async (req, res) => {
   const { email } = req.query;
   if (!email) return res.status(400).send('Email is required');
@@ -107,7 +111,21 @@ app.get('/api/setup-admin', async (req, res) => {
   }
 });
 
-// لیست کاربران (امن شده)
+// لینک بازنشانی رمز (برای زمانی که رمز را فراموش کردید)
+app.get('/api/force-reset', async (req, res) => {
+  const { email, newPassword } = req.query;
+  if (!email || !newPassword) return res.status(400).send('Email and newPassword are required');
+  try {
+    const hashedPassword = await bcrypt.hash(newPassword, 10);
+    const result = await pool.query("UPDATE users SET password_hash = $1 WHERE email = $2 RETURNING *", [hashedPassword, email]);
+    if (result.rows.length === 0) return res.status(404).send('User not found in database');
+    res.send(`Success! Password for ${email} has been reset to: ${newPassword}`);
+  } catch (err) {
+    res.status(500).send('Error resetting password');
+  }
+});
+
+// لیست کاربران (امن)
 app.get('/api/admin/users', authenticateAdmin, async (req, res) => {
   try {
     const result = await pool.query('SELECT id, username, email, role, workshop_id, created_at FROM users ORDER BY id DESC');
@@ -117,7 +135,7 @@ app.get('/api/admin/users', authenticateAdmin, async (req, res) => {
   }
 });
 
-// تغییر نقش کاربر (جدید)
+// تغییر نقش (امن)
 app.put('/api/admin/users/:id/role', authenticateAdmin, async (req, res) => {
   const { id } = req.params;
   const { role } = req.body;
