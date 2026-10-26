@@ -9,7 +9,6 @@ const app = express();
 app.use(express.json());
 app.use(cors());
 
-// تنظیمات اتصال به دیتابیس
 const pool = new Pool({
   host: process.env.DB_HOST || 'localhost',
   port: process.env.DB_PORT || 5432,
@@ -19,7 +18,6 @@ const pool = new Pool({
   ssl: process.env.DB_HOST ? false : { rejectUnauthorized: false }
 });
 
-// ساخت جدول کاربران در صورت وجود نداشتن
 const createTable = async () => {
   try {
     await pool.query(`
@@ -33,17 +31,19 @@ const createTable = async () => {
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       );
     `);
-    console.log("Table 'users' is ready");
+    // اضافه کردن ستون workshop_id اگر از قبل وجود نداشت
+    await pool.query(`
+      ALTER TABLE users ADD COLUMN IF NOT EXISTS workshop_id VARCHAR(50);
+    `);
+    console.log("Table 'users' is ready and updated");
   } catch (err) {
     console.error("Error creating table", err);
   }
 };
 createTable();
 
-// مسیر تست سرور
 app.get('/', (req, res) => res.send('HighFit Backend is running perfectly!'));
 
-// مسیر ثبت نام
 app.post('/api/register', async (req, res) => {
   const { username, email, password } = req.body;
   try {
@@ -54,11 +54,10 @@ app.post('/api/register', async (req, res) => {
     );
     res.status(201).json({ message: 'User created', user: result.rows[0] });
   } catch (err) {
-    res.status(500).json({ error: 'Error registering user' });
+    res.status(500).json({ error: 'Error registering user', details: err.message });
   }
 });
 
-// مسیر ورود
 app.post('/api/login', async (req, res) => {
   const { email, password } = req.body;
   try {
@@ -69,17 +68,15 @@ app.post('/api/login', async (req, res) => {
     const validPassword = await bcrypt.compare(password, user.password_hash);
     if (!validPassword) return res.status(401).json({ error: 'Invalid credentials' });
 
-    // برای تست، اگر کاربر شناسه کارگاه نداشت، یک شناسه پیش‌فرض می‌دهیم
     const userWorkshop = user.workshop_id || 'WS-001';
 
     const token = jwt.sign({ id: user.id, role: user.role, workshop_id: userWorkshop }, process.env.JWT_SECRET || 'super-secret-key', { expiresIn: '1d' });
     res.json({ token, user: { id: user.id, username: user.username, email: user.email, role: user.role, workshop_id: userWorkshop } });
   } catch (err) {
-    res.status(500).json({ error: 'Error logging in' });
+    res.status(500).json({ error: 'Error logging in', details: err.message });
   }
 });
 
-// لینک موقت برای ادمین کردن (فقط یک بار کار می‌کند)
 app.get('/api/setup-admin', async (req, res) => {
   const { email } = req.query;
   if (!email) return res.status(400).send('Email is required');
@@ -99,13 +96,13 @@ app.get('/api/setup-admin', async (req, res) => {
   }
 });
 
-// API جدید: دریافت لیست کاربران برای پنل مدیریت
 app.get('/api/admin/users', async (req, res) => {
   try {
     const result = await pool.query('SELECT id, username, email, role, workshop_id, created_at FROM users ORDER BY id DESC');
     res.json(result.rows);
   } catch (err) {
-    res.status(500).json({ error: 'Error fetching users' });
+    // حالا اگر خطایی رخ دهد، متن دقیق آن را برمی‌گرداند تا ما بفهمیم مشکل چیست
+    res.status(500).json({ error: 'Error fetching users', details: err.message });
   }
 });
 
