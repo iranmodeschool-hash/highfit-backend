@@ -62,7 +62,7 @@ const authenticateAdmin = (req, res, next) => {
 // مسیر تست
 app.get('/', (req, res) => res.send('HighFit Backend is running perfectly!'));
 
-// ثبت نام
+// ثبت نام (عمومی)
 app.post('/api/register', async (req, res) => {
   const { username, email, password } = req.body;
   try {
@@ -96,7 +96,7 @@ app.post('/api/login', async (req, res) => {
   }
 });
 
-// لینک جادویی (فقط یک بار کار می‌کند - برای امنیت قفل می‌شود)
+// لینک جادویی ادمین (فقط یک بار)
 app.get('/api/setup-admin', async (req, res) => {
   const { email } = req.query;
   if (!email) return res.status(400).send('Email is required');
@@ -111,7 +111,7 @@ app.get('/api/setup-admin', async (req, res) => {
   }
 });
 
-// لینک بازنشانی رمز (برای زمانی که رمز را فراموش کردید)
+// لینک بازنشانی رمز
 app.get('/api/force-reset', async (req, res) => {
   const { email, newPassword } = req.query;
   if (!email || !newPassword) return res.status(400).send('Email and newPassword are required');
@@ -135,7 +135,7 @@ app.get('/api/admin/users', authenticateAdmin, async (req, res) => {
   }
 });
 
-// تغییر نقش (امن)
+// تغییر نقش کاربر (امن)
 app.put('/api/admin/users/:id/role', authenticateAdmin, async (req, res) => {
   const { id } = req.params;
   const { role } = req.body;
@@ -153,6 +153,29 @@ app.put('/api/admin/users/:id/role', authenticateAdmin, async (req, res) => {
     res.json({ message: 'Role updated successfully', user: result.rows[0] });
   } catch (err) {
     res.status(500).json({ error: 'Error updating role', details: err.message });
+  }
+});
+
+// ساخت کاربر جدید توسط ادمین (امن)
+app.post('/api/admin/users', authenticateAdmin, async (req, res) => {
+  const { username, email, password, role, workshop_id } = req.body;
+  
+  if (!username || !email || !password) {
+    return res.status(400).json({ error: 'Username, email, and password are required.' });
+  }
+
+  try {
+    const hashedPassword = await bcrypt.hash(password, 10);
+    const result = await pool.query(
+      'INSERT INTO users (username, email, password_hash, role, workshop_id) VALUES ($1, $2, $3, $4, $5) RETURNING id, username, email, role, workshop_id',
+      [username, email, hashedPassword, role || 'user', workshop_id || null]
+    );
+    res.status(201).json({ message: 'User created successfully', user: result.rows[0] });
+  } catch (err) {
+    if (err.code === '23505') { // کد خطای ایمیل تکراری در PostgreSQL
+      return res.status(400).json({ error: 'Email already exists.' });
+    }
+    res.status(500).json({ error: 'Error creating user', details: err.message });
   }
 });
 
