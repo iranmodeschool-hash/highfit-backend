@@ -26,12 +26,15 @@ const createTable = async () => {
         username VARCHAR(50) UNIQUE NOT NULL,
         email VARCHAR(100) UNIQUE NOT NULL,
         password_hash VARCHAR(255) NOT NULL,
-        role VARCHAR(20) DEFAULT 'user',
+        role VARCHAR(30) DEFAULT 'workshop_manager',
         workshop_id VARCHAR(50),
+        permissions JSONB DEFAULT '{}',
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       );
     `);
+    // اضافه کردن ستون‌های جدید در صورت وجود نداشتن
     await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS workshop_id VARCHAR(50);`);
+    await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS permissions JSONB DEFAULT '{}';`);
     console.log("Table 'users' is ready and updated");
   } catch (err) {
     console.error("Error creating table", err);
@@ -62,14 +65,14 @@ const authenticateAdmin = (req, res, next) => {
 // مسیر تست
 app.get('/', (req, res) => res.send('HighFit Backend is running perfectly!'));
 
-// ثبت نام (عمومی)
+// ثبت نام (عمومی - کاربران عادی)
 app.post('/api/register', async (req, res) => {
   const { username, email, password } = req.body;
   try {
     const hashedPassword = await bcrypt.hash(password, 10);
     const result = await pool.query(
-      'INSERT INTO users (username, email, password_hash) VALUES ($1, $2, $3) RETURNING id, username, email, role, workshop_id',
-      [username, email, hashedPassword]
+      'INSERT INTO users (username, email, password_hash, role) VALUES ($1, $2, $3, $4) RETURNING id, username, email, role, workshop_id',
+      [username, email, hashedPassword, 'workshop_manager']
     );
     res.status(201).json({ message: 'User created', user: result.rows[0] });
   } catch (err) {
@@ -89,8 +92,12 @@ app.post('/api/login', async (req, res) => {
     if (!validPassword) return res.status(401).json({ error: 'Invalid credentials' });
 
     const userWorkshop = user.workshop_id || 'WS-001';
-    const token = jwt.sign({ id: user.id, role: user.role, workshop_id: userWorkshop }, process.env.JWT_SECRET || 'super-secret-key', { expiresIn: '1d' });
-    res.json({ token, user: { id: user.id, username: user.username, email: user.email, role: user.role, workshop_id: userWorkshop } });
+    const token = jwt.sign(
+      { id: user.id, role: user.role, workshop_id: userWorkshop, permissions: user.permissions }, 
+      process.env.JWT_SECRET || 'super-secret-key', 
+      { expiresIn: '1d' }
+    );
+    res.json({ token, user: { id: user.id, username: user.username, email: user.email, role: user.role, workshop_id: userWorkshop, permissions: user.permissions } });
   } catch (err) {
     res.status(500).json({ error: 'Error logging in', details: err.message });
   }
@@ -140,7 +147,8 @@ app.put('/api/admin/users/:id/role', authenticateAdmin, async (req, res) => {
   const { id } = req.params;
   const { role } = req.body;
 
-  if (!['user', 'manager', 'admin'].includes(role)) {
+  const validRoles = ['admin', 'supervisor', 'workshop_manager'];
+  if (!validRoles.includes(role)) {
     return res.status(400).json({ error: 'Invalid role specified.' });
   }
 
@@ -164,11 +172,14 @@ app.post('/api/admin/users', authenticateAdmin, async (req, res) => {
     return res.status(400).json({ error: 'Username, email, and password are required.' });
   }
 
+  const validRoles = ['admin', 'supervisor', 'workshop_manager'];
+  const finalRole = validRoles.includes(role) ? role : 'workshop_manager';
+
   try {
     const hashedPassword = await bcrypt.hash(password, 10);
     const result = await pool.query(
       'INSERT INTO users (username, email, password_hash, role, workshop_id) VALUES ($1, $2, $3, $4, $5) RETURNING id, username, email, role, workshop_id',
-      [username, email, hashedPassword, role || 'user', workshop_id || null]
+      [username, email, hashedPassword, finalRole, workshop_id || null]
     );
     res.status(201).json({ message: 'User created successfully', user: result.rows[0] });
   } catch (err) {
