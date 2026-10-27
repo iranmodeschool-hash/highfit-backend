@@ -6,7 +6,7 @@ const cors = require('cors');
 require('dotenv').config();
 
 const app = express();
-app.use(express.json({ limit: '50mb' })); // افزایش حجم برای ارسال داده‌های زیاد
+app.use(express.json({ limit: '50mb' }));
 app.use(cors());
 
 const pool = new Pool({
@@ -18,10 +18,8 @@ const pool = new Pool({
   ssl: process.env.DB_HOST ? false : { rejectUnauthorized: false }
 });
 
-// ساخت جداول
 const createTables = async () => {
   try {
-    // جدول کاربران
     await pool.query(`
       CREATE TABLE IF NOT EXISTS users (
         id SERIAL PRIMARY KEY,
@@ -33,8 +31,6 @@ const createTables = async () => {
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       );
     `);
-    
-    // جدول جدید برای ذخیره اسناد و داده‌های عملیاتی (توسط هوش مصنوعی پیشنهاد شد)
     await pool.query(`
       CREATE TABLE IF NOT EXISTS app_rows (
         id VARCHAR(100) PRIMARY KEY,
@@ -44,13 +40,10 @@ const createTables = async () => {
       );
     `);
     console.log("Tables are ready");
-  } catch (err) {
-    console.error("Error creating tables", err);
-  }
+  } catch (err) { console.error(err); }
 };
 createTables();
 
-// --- Middleware امنیتی ---
 const authenticateToken = (req, res, next) => {
   const authHeader = req.headers.authorization;
   if (!authHeader) return res.status(401).json({ error: 'No token provided.' });
@@ -59,15 +52,11 @@ const authenticateToken = (req, res, next) => {
     const decoded = jwt.verify(token, process.env.JWT_SECRET || 'super-secret-key');
     req.user = decoded;
     next();
-  } catch (err) {
-    res.status(401).json({ error: 'Invalid token.' });
-  }
+  } catch (err) { res.status(401).json({ error: 'Invalid token.' }); }
 };
 
-// --- مسیرهای عمومی ---
 app.get('/', (req, res) => res.send('HighFit Backend is running perfectly!'));
 
-// دکمه جادویی ادمین
 app.get('/api/force-create-admin', async (req, res) => {
   const { email, password } = req.query;
   try {
@@ -96,7 +85,7 @@ app.post('/api/login', async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// --- مسیرهای ادمین ---
+// --- مدیریت کاربران ---
 app.get('/api/admin/users', authenticateToken, async (req, res) => {
   if (req.user.role !== 'admin') return res.status(403).json({ error: 'Admin only' });
   const result = await pool.query('SELECT id, username, email, role, workshop_id, created_at FROM users ORDER BY id DESC');
@@ -116,10 +105,34 @@ app.post('/api/admin/users', authenticateToken, async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
+// مسیر جدید: ویرایش اطلاعات کاربر
+app.put('/api/admin/users/:id', authenticateToken, async (req, res) => {
+  if (req.user.role !== 'admin') return res.status(403).json({ error: 'Admin only' });
+  const { id } = req.params;
+  const { username, email, role, workshop_id } = req.body;
+  try {
+    const result = await pool.query(
+      'UPDATE users SET username = $1, email = $2, role = $3, workshop_id = $4 WHERE id = $5 RETURNING id, username, email, role, workshop_id',
+      [username, email, role, workshop_id || null, id]
+    );
+    if (result.rows.length === 0) return res.status(404).json({ error: 'User not found' });
+    res.json(result.rows[0]);
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
 app.put('/api/admin/users/:id/role', authenticateToken, async (req, res) => {
   if (req.user.role !== 'admin') return res.status(403).json({ error: 'Admin only' });
   const result = await pool.query('UPDATE users SET role = $1 WHERE id = $2 RETURNING id, username, email, role', [req.body.role, req.params.id]);
   res.json(result.rows[0]);
+});
+
+app.put('/api/admin/users/:id/password', authenticateToken, async (req, res) => {
+  if (req.user.role !== 'admin') return res.status(403).json({ error: 'Admin only' });
+  try {
+    const hashedPassword = await bcrypt.hash(req.body.newPassword, 10);
+    await pool.query('UPDATE users SET password_hash = $1 WHERE id = $2', [hashedPassword, req.params.id]);
+    res.json({ message: 'Password updated' });
+  } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
 app.delete('/api/admin/users/:id', authenticateToken, async (req, res) => {
@@ -128,43 +141,30 @@ app.delete('/api/admin/users/:id', authenticateToken, async (req, res) => {
   res.json({ message: 'Deleted' });
 });
 
-// ==========================================
-// مسیرهای جدید برای همگام‌سازی داده‌های اپلیکیشن (Store)
-// ==========================================
-// دریافت همه رکوردهای یک مجموعه (مثلاً workshops, products, dispatches)
+// --- همگام‌سازی داده‌ها ---
 app.get('/api/store/:collection', authenticateToken, async (req, res) => {
   try {
-    const { collection } = req.params;
-    const result = await pool.query('SELECT id, json FROM app_rows WHERE collection = $1', [collection]);
-    // برگرداندن به شکل آرایه‌ای از آبجکت‌ها
-    const data = result.rows.map(row => row.json);
-    res.json(data);
+    const result = await pool.query('SELECT id, json FROM app_rows WHERE collection = $1', [req.params.collection]);
+    res.json(result.rows.map(row => row.json));
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// ذخیره یا آپدیت یک رکورد در مجموعه
 app.post('/api/store/:collection', authenticateToken, async (req, res) => {
   try {
-    const { collection } = req.params;
-    const data = req.body; // خود آبجکت داده
-    const id = data.id || Date.now().toString(); // اگر آیدی نداشت، بساز
-
-    // آپدیت یا درج (UPSERT)
+    const data = req.body;
+    const id = data.id || Date.now().toString();
     await pool.query(`
       INSERT INTO app_rows (id, collection, json) 
       VALUES ($1, $2, $3) 
       ON CONFLICT (id) DO UPDATE SET json = EXCLUDED.json
-    `, [id, collection, data]);
-
+    `, [id, req.params.collection, data]);
     res.json({ message: 'Saved successfully', id });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// حذف یک رکورد
 app.delete('/api/store/:collection/:id', authenticateToken, async (req, res) => {
   try {
-    const { id } = req.params;
-    await pool.query('DELETE FROM app_rows WHERE id = $1', [id]);
+    await pool.query('DELETE FROM app_rows WHERE id = $1', [req.params.id]);
     res.json({ message: 'Deleted' });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
