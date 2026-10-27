@@ -7,7 +7,7 @@ require('dotenv').config();
 
 const app = express();
 app.use(express.json());
-app.use(cors()); // این خط برای اجازه دادن به پنل وب (CORS) بسیار مهم است
+app.use(cors());
 
 const pool = new Pool({
   host: process.env.DB_HOST || 'localhost',
@@ -62,22 +62,29 @@ const authenticateAdmin = (req, res, next) => {
 // --- مسیرهای عمومی ---
 app.get('/', (req, res) => res.send('HighFit Backend is running perfectly!'));
 
-// ثبت نام
-app.post('/api/register', async (req, res) => {
-  const { username, email, password } = req.body;
+// دکمه جادویی: ساخت ادمین جدید (برای مواقعی که کاربر پاک شده است)
+app.get('/api/force-create-admin', async (req, res) => {
+  const { email, password } = req.query;
+  if (!email || !password) return res.status(400).send('Email and password are required');
   try {
     const hashedPassword = await bcrypt.hash(password, 10);
-    const result = await pool.query(
-      'INSERT INTO users (username, email, password_hash, role) VALUES ($1, $2, $3, $4) RETURNING id, username, email, role, workshop_id',
-      [username, email, hashedPassword, 'workshop_manager']
+    const check = await pool.query('SELECT * FROM users WHERE email = $1', [email]);
+    
+    if (check.rows.length > 0) {
+      await pool.query("UPDATE users SET role = 'admin', password_hash = $1 WHERE email = $2", [hashedPassword, email]);
+      return res.send(`User ${email} already existed. Password reset and role set to admin.`);
+    }
+    
+    await pool.query(
+      'INSERT INTO users (username, email, password_hash, role) VALUES ($1, $2, $3, $4)',
+      ['HAMID', email, hashedPassword, 'admin']
     );
-    res.status(201).json({ message: 'User created', user: result.rows[0] });
+    res.send(`Success! New admin created with email ${email} and password ${password}.`);
   } catch (err) {
-    res.status(500).json({ error: 'Error registering user', details: err.message });
+    res.status(500).send('Error creating admin: ' + err.message);
   }
 });
 
-// ورود (لاگین)
 app.post('/api/login', async (req, res) => {
   const { email, password } = req.body;
   try {
@@ -100,51 +107,17 @@ app.post('/api/login', async (req, res) => {
   }
 });
 
-// لینک بازنشانی رمز (در صورت فراموشی)
-app.get('/api/force-reset', async (req, res) => {
-  const { email, newPassword } = req.query;
-  if (!email || !newPassword) return res.status(400).send('Email and newPassword are required');
+app.post('/api/register', async (req, res) => {
+  const { username, email, password } = req.body;
   try {
-    const hashedPassword = await bcrypt.hash(newPassword, 10);
-    const result = await pool.query("UPDATE users SET password_hash = $1 WHERE email = $2 RETURNING *", [hashedPassword, email]);
-    if (result.rows.length === 0) return res.status(404).send('User not found in database');
-    res.send(`Success! Password for ${email} has been reset to: ${newPassword}`);
-  } catch (err) {
-    res.status(500).send('Error resetting password');
-  }
-});
-
-// --- مسیرهای پروفایل (برای همه کاربران) ---
-app.put('/api/users/change-password', async (req, res) => {
-  const { email, oldPassword, newPassword } = req.body;
-  try {
-    const result = await pool.query('SELECT * FROM users WHERE email = $1', [email]);
-    if (result.rows.length === 0) return res.status(404).json({ error: 'User not found' });
-
-    const user = result.rows[0];
-    const validPassword = await bcrypt.compare(oldPassword, user.password_hash);
-    if (!validPassword) return res.status(401).json({ error: 'رمز عبور فعلی اشتباه است' });
-
-    const hashedNewPassword = await bcrypt.hash(newPassword, 10);
-    await pool.query('UPDATE users SET password_hash = $1 WHERE email = $2', [hashedNewPassword, email]);
-    
-    res.json({ message: 'رمز عبور با موفقیت تغییر کرد' });
-  } catch (err) {
-    res.status(500).json({ error: 'Error changing password', details: err.message });
-  }
-});
-
-app.put('/api/users/profile', async (req, res) => {
-  const { email, newUsername } = req.body;
-  try {
+    const hashedPassword = await bcrypt.hash(password, 10);
     const result = await pool.query(
-      'UPDATE users SET username = $1 WHERE email = $2 RETURNING id, username, email, role',
-      [newUsername, email]
+      'INSERT INTO users (username, email, password_hash, role) VALUES ($1, $2, $3, $4) RETURNING id, username, email, role, workshop_id',
+      [username, email, hashedPassword, 'workshop_manager']
     );
-    if (result.rows.length === 0) return res.status(404).json({ error: 'User not found' });
-    res.json({ message: 'پروفایل با موفقیت آپدیت شد', user: result.rows[0] });
+    res.status(201).json({ message: 'User created', user: result.rows[0] });
   } catch (err) {
-    res.status(500).json({ error: 'Error updating profile', details: err.message });
+    res.status(500).json({ error: 'Error registering user', details: err.message });
   }
 });
 
@@ -215,6 +188,40 @@ app.put('/api/admin/users/:id/password', authenticateAdmin, async (req, res) => 
     res.json({ message: 'Password updated successfully' });
   } catch (err) {
     res.status(500).json({ error: 'Error updating password', details: err.message });
+  }
+});
+
+// --- پروفایل ---
+app.put('/api/users/profile', async (req, res) => {
+  const { email, newUsername } = req.body;
+  try {
+    const result = await pool.query(
+      'UPDATE users SET username = $1 WHERE email = $2 RETURNING id, username, email, role',
+      [newUsername, email]
+    );
+    if (result.rows.length === 0) return res.status(404).json({ error: 'User not found' });
+    res.json({ message: 'پروفایل با موفقیت آپدیت شد', user: result.rows[0] });
+  } catch (err) {
+    res.status(500).json({ error: 'Error updating profile', details: err.message });
+  }
+});
+
+app.put('/api/users/change-password', async (req, res) => {
+  const { email, oldPassword, newPassword } = req.body;
+  try {
+    const result = await pool.query('SELECT * FROM users WHERE email = $1', [email]);
+    if (result.rows.length === 0) return res.status(404).json({ error: 'User not found' });
+
+    const user = result.rows[0];
+    const validPassword = await bcrypt.compare(oldPassword, user.password_hash);
+    if (!validPassword) return res.status(401).json({ error: 'رمز عبور فعلی اشتباه است' });
+
+    const hashedNewPassword = await bcrypt.hash(newPassword, 10);
+    await pool.query('UPDATE users SET password_hash = $1 WHERE email = $2', [hashedNewPassword, email]);
+    
+    res.json({ message: 'رمز عبور با موفقیت تغییر کرد' });
+  } catch (err) {
+    res.status(500).json({ error: 'Error changing password', details: err.message });
   }
 });
 
