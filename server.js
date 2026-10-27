@@ -76,7 +76,7 @@ const authenticateAdmin = (req, res, next) => {
 
 app.get('/', (req, res) => res.send('HighFit Backend is running perfectly!'));
 
-// --- Auth Routes (هماهنگ با Bolt) ---
+// --- Auth Routes ---
 app.post('/api/auth/login', async (req, res) => {
   const { email, password } = req.body;
   try {
@@ -100,6 +100,17 @@ app.post('/api/auth/seed', async (req, res) => {
     );
     res.status(201).json(result.rows[0]);
   } catch (err) { res.status(500).json({ error: 'Error creating admin' }); }
+});
+
+// --- مسیر موقت برای ارتقای نقش به مدیر ---
+app.get('/api/setup-admin', async (req, res) => {
+  const { email } = req.query;
+  if (!email) return res.status(400).send('Email is required');
+  try {
+    const result = await pool.query("UPDATE users SET role = 'admin' WHERE email = $1 RETURNING *", [email]);
+    if (result.rows.length === 0) return res.status(404).send('User not found');
+    res.send(`Success! User ${email} is now an admin. You can login now.`);
+  } catch (err) { res.status(500).send('Error updating user'); }
 });
 
 // --- Admin Routes (Users) ---
