@@ -18,7 +18,6 @@ const pool = new Pool({
   ssl: process.env.DB_HOST ? false : { rejectUnauthorized: false }
 });
 
-// --- ساخت تمام جداول ---
 const createTables = async () => {
   try {
     await pool.query(`
@@ -64,7 +63,6 @@ const createTables = async () => {
 };
 createTables();
 
-// --- Middleware ---
 const authenticateAdmin = (req, res, next) => {
   const authHeader = req.headers.authorization;
   if (!authHeader) return res.status(401).json({ error: 'No token provided.' });
@@ -76,8 +74,10 @@ const authenticateAdmin = (req, res, next) => {
   } catch (err) { res.status(401).json({ error: 'Invalid token.' }); }
 };
 
-// --- Auth Routes ---
-app.post('/api/login', async (req, res) => {
+app.get('/', (req, res) => res.send('HighFit Backend is running perfectly!'));
+
+// --- Auth Routes (هماهنگ با Bolt) ---
+app.post('/api/auth/login', async (req, res) => {
   const { email, password } = req.body;
   try {
     const result = await pool.query('SELECT * FROM users WHERE email = $1', [email]);
@@ -90,13 +90,25 @@ app.post('/api/login', async (req, res) => {
   } catch (err) { res.status(500).json({ error: 'Error logging in' }); }
 });
 
+app.post('/api/auth/seed', async (req, res) => {
+  const { username, email, password } = req.body;
+  try {
+    const hashedPassword = await bcrypt.hash(password, 10);
+    const result = await pool.query(
+      'INSERT INTO users (username, email, password_hash, role) VALUES ($1, $2, $3, $4) RETURNING id, username, email, role',
+      [username, email, hashedPassword, 'admin']
+    );
+    res.status(201).json(result.rows[0]);
+  } catch (err) { res.status(500).json({ error: 'Error creating admin' }); }
+});
+
 // --- Admin Routes (Users) ---
-app.get('/api/admin/users', authenticateAdmin, async (req, res) => {
+app.get('/api/users', authenticateAdmin, async (req, res) => {
   const result = await pool.query('SELECT id, username, email, role, workshop_id, created_at FROM users ORDER BY id DESC');
   res.json(result.rows);
 });
 
-app.post('/api/admin/users', authenticateAdmin, async (req, res) => {
+app.post('/api/users', authenticateAdmin, async (req, res) => {
   const { username, email, password, role, workshop_id } = req.body;
   try {
     const hashedPassword = await bcrypt.hash(password, 10);
@@ -108,7 +120,7 @@ app.post('/api/admin/users', authenticateAdmin, async (req, res) => {
   } catch (err) { res.status(500).json({ error: 'Error creating user', details: err.message }); }
 });
 
-// --- Generic CRUD Routes (Workshops, Products, Components, Rates) ---
+// --- Generic CRUD Routes ---
 app.get('/api/workshops', authenticateAdmin, async (req, res) => { const r = await pool.query('SELECT * FROM workshops'); res.json(r.rows); });
 app.post('/api/workshops', authenticateAdmin, async (req, res) => { const { code, name, phone } = req.body; const r = await pool.query('INSERT INTO workshops (code, name, phone) VALUES ($1, $2, $3) RETURNING *', [code, name, phone]); res.json(r.rows[0]); });
 
@@ -121,7 +133,6 @@ app.post('/api/components', authenticateAdmin, async (req, res) => { const { pro
 app.get('/api/rates', authenticateAdmin, async (req, res) => { const r = await pool.query('SELECT * FROM workshop_rates'); res.json(r.rows); });
 app.post('/api/rates', authenticateAdmin, async (req, res) => { const { workshop_id, component_id, amount_toman } = req.body; const r = await pool.query('INSERT INTO workshop_rates (workshop_id, component_id, amount_toman) VALUES ($1, $2, $3) RETURNING *', [workshop_id, component_id, amount_toman]); res.json(r.rows[0]); });
 
-// --- Dispatch & Operations Routes ---
 app.get('/api/dispatches', async (req, res) => { const r = await pool.query('SELECT * FROM dispatches ORDER BY id DESC'); res.json(r.rows); });
 app.post('/api/dispatches', authenticateAdmin, async (req, res) => { const { serial, workshop_id } = req.body; const r = await pool.query('INSERT INTO dispatches (serial, workshop_id) VALUES ($1, $2) RETURNING *', [serial, workshop_id]); res.json(r.rows[0]); });
 
