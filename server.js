@@ -69,14 +69,16 @@ const authenticateAdmin = (req, res, next) => {
   const token = authHeader.split(' ')[1];
   try {
     const decoded = jwt.verify(token, process.env.JWT_SECRET || 'super-secret-key');
-    if (decoded.role !== 'admin') return res.status(403).json({ error: 'Admin role required.' });
+    // اصلاح شد: پذیرش هر دو نقش manager و admin
+    if (decoded.role !== 'manager' && decoded.role !== 'admin') {
+      return res.status(403).json({ error: 'Manager role required.' });
+    }
     req.user = decoded; next();
   } catch (err) { res.status(401).json({ error: 'Invalid token.' }); }
 };
 
 app.get('/', (req, res) => res.send('HighFit Backend is running perfectly!'));
 
-// --- Auth Routes ---
 app.post('/api/auth/login', async (req, res) => {
   const { email, password } = req.body;
   try {
@@ -90,30 +92,18 @@ app.post('/api/auth/login', async (req, res) => {
   } catch (err) { res.status(500).json({ error: 'Error logging in' }); }
 });
 
-app.post('/api/auth/seed', async (req, res) => {
-  const { username, email, password } = req.body;
-  try {
-    const hashedPassword = await bcrypt.hash(password, 10);
-    const result = await pool.query(
-      'INSERT INTO users (username, email, password_hash, role) VALUES ($1, $2, $3, $4) RETURNING id, username, email, role',
-      [username, email, hashedPassword, 'admin']
-    );
-    res.status(201).json(result.rows[0]);
-  } catch (err) { res.status(500).json({ error: 'Error creating admin' }); }
-});
-
-// --- مسیر موقت برای ارتقای نقش به مدیر ---
+// مسیر موقت برای ارتقای نقش به manager
 app.get('/api/setup-admin', async (req, res) => {
   const { email } = req.query;
   if (!email) return res.status(400).send('Email is required');
   try {
-    const result = await pool.query("UPDATE users SET role = 'admin' WHERE email = $1 RETURNING *", [email]);
+    // تغییر نقش به manager به جای admin
+    const result = await pool.query("UPDATE users SET role = 'manager' WHERE email = $1 RETURNING *", [email]);
     if (result.rows.length === 0) return res.status(404).send('User not found');
-    res.send(`Success! User ${email} is now an admin. You can login now.`);
+    res.send(`Success! User ${email} is now a manager. You can login now.`);
   } catch (err) { res.status(500).send('Error updating user'); }
 });
 
-// --- Admin Routes (Users) ---
 app.get('/api/users', authenticateAdmin, async (req, res) => {
   const result = await pool.query('SELECT id, username, email, role, workshop_id, created_at FROM users ORDER BY id DESC');
   res.json(result.rows);
@@ -131,7 +121,6 @@ app.post('/api/users', authenticateAdmin, async (req, res) => {
   } catch (err) { res.status(500).json({ error: 'Error creating user', details: err.message }); }
 });
 
-// --- Generic CRUD Routes ---
 app.get('/api/workshops', authenticateAdmin, async (req, res) => { const r = await pool.query('SELECT * FROM workshops'); res.json(r.rows); });
 app.post('/api/workshops', authenticateAdmin, async (req, res) => { const { code, name, phone } = req.body; const r = await pool.query('INSERT INTO workshops (code, name, phone) VALUES ($1, $2, $3) RETURNING *', [code, name, phone]); res.json(r.rows[0]); });
 
