@@ -78,7 +78,7 @@ const authenticateAdmin = (req, res, next) => {
 
 app.get('/', (req, res) => res.send('HighFit Backend is running perfectly!'));
 
-// --- مسیرهای احراز هویت ---
+// --- Auth ---
 app.post('/api/auth/login', async (req, res) => {
   const { email, password } = req.body;
   try {
@@ -92,27 +92,7 @@ app.post('/api/auth/login', async (req, res) => {
   } catch (err) { res.status(500).json({ error: 'Error logging in' }); }
 });
 
-app.post('/api/auth/seed', async (req, res) => {
-  const { username, email, password } = req.body;
-  try {
-    const hashedPassword = await bcrypt.hash(password, 10);
-    const result = await pool.query(
-      'INSERT INTO users (username, email, password_hash, role) VALUES ($1, $2, $3, $4) RETURNING id, username, email, role',
-      [username, email, hashedPassword, 'manager'] // تنظیم روی manager
-    );
-    res.status(201).json(result.rows[0]);
-  } catch (err) { res.status(500).json({ error: 'Error creating admin' }); }
-});
-
-// --- مسیر موقت برای پاک کردن تمام کاربران ---
-app.get('/api/reset-users', async (req, res) => {
-  try {
-    await pool.query('DELETE FROM users');
-    res.send('All users deleted successfully. You can now go to the app and create a fresh admin.');
-  } catch (err) { res.status(500).send('Error deleting users'); }
-});
-
-// --- سایر مسیرها ---
+// --- Users (Admin & Workshop) ---
 app.get('/api/users', authenticateAdmin, async (req, res) => {
   const result = await pool.query('SELECT id, username, email, role, workshop_id, created_at FROM users ORDER BY id DESC');
   res.json(result.rows);
@@ -130,25 +110,59 @@ app.post('/api/users', authenticateAdmin, async (req, res) => {
   } catch (err) { res.status(500).json({ error: 'Error creating user', details: err.message }); }
 });
 
-app.get('/api/workshops', authenticateAdmin, async (req, res) => { const r = await pool.query('SELECT * FROM workshops'); res.json(r.rows); });
+// --- Workshops ---
+app.get('/api/workshops', async (req, res) => { const r = await pool.query('SELECT * FROM workshops'); res.json(r.rows); });
 app.post('/api/workshops', authenticateAdmin, async (req, res) => { const { code, name, phone } = req.body; const r = await pool.query('INSERT INTO workshops (code, name, phone) VALUES ($1, $2, $3) RETURNING *', [code, name, phone]); res.json(r.rows[0]); });
 
-app.get('/api/products', authenticateAdmin, async (req, res) => { const r = await pool.query('SELECT * FROM products'); res.json(r.rows); });
+// --- Products & Components ---
+app.get('/api/products', async (req, res) => { const r = await pool.query('SELECT * FROM products'); res.json(r.rows); });
 app.post('/api/products', authenticateAdmin, async (req, res) => { const { code, name } = req.body; const r = await pool.query('INSERT INTO products (code, name) VALUES ($1, $2) RETURNING *', [code, name]); res.json(r.rows[0]); });
-
-app.get('/api/components', authenticateAdmin, async (req, res) => { const r = await pool.query('SELECT * FROM product_components'); res.json(r.rows); });
+app.get('/api/components', async (req, res) => { const r = await pool.query('SELECT * FROM product_components'); res.json(r.rows); });
 app.post('/api/components', authenticateAdmin, async (req, res) => { const { product_id, code, name } = req.body; const r = await pool.query('INSERT INTO product_components (product_id, code, name) VALUES ($1, $2, $3) RETURNING *', [product_id, code, name]); res.json(r.rows[0]); });
 
-app.get('/api/rates', authenticateAdmin, async (req, res) => { const r = await pool.query('SELECT * FROM workshop_rates'); res.json(r.rows); });
+// --- Rates ---
+app.get('/api/rates', async (req, res) => { const r = await pool.query('SELECT * FROM workshop_rates'); res.json(r.rows); });
 app.post('/api/rates', authenticateAdmin, async (req, res) => { const { workshop_id, component_id, amount_toman } = req.body; const r = await pool.query('INSERT INTO workshop_rates (workshop_id, component_id, amount_toman) VALUES ($1, $2, $3) RETURNING *', [workshop_id, component_id, amount_toman]); res.json(r.rows[0]); });
 
+// --- Dispatches ---
 app.get('/api/dispatches', async (req, res) => { const r = await pool.query('SELECT * FROM dispatches ORDER BY id DESC'); res.json(r.rows); });
 app.post('/api/dispatches', authenticateAdmin, async (req, res) => { const { serial, workshop_id } = req.body; const r = await pool.query('INSERT INTO dispatches (serial, workshop_id) VALUES ($1, $2) RETURNING *', [serial, workshop_id]); res.json(r.rows[0]); });
 
+// --- Receipts ---
 app.get('/api/receipts', async (req, res) => { const r = await pool.query('SELECT * FROM receipts'); res.json(r.rows); });
+app.post('/api/receipts', async (req, res) => { const { dispatch_id } = req.body; const r = await pool.query('INSERT INTO receipts (dispatch_id) VALUES ($1) RETURNING *', [dispatch_id]); res.json(r.rows[0]); });
+
+// --- Sewing / Deliveries (این بخش مشکل قبلی را حل می‌کند) ---
+app.get('/api/sewing', async (req, res) => { const r = await pool.query('SELECT * FROM sewing_deliveries'); res.json(r.rows); });
 app.get('/api/deliveries', async (req, res) => { const r = await pool.query('SELECT * FROM sewing_deliveries'); res.json(r.rows); });
+app.post('/api/sewing', async (req, res) => { 
+  const { dispatch_id, workshop_id, qty_sewn, qty_delivered } = req.body; 
+  const r = await pool.query('INSERT INTO sewing_deliveries (dispatch_id, workshop_id, qty_sewn, qty_delivered) VALUES ($1, $2, $3, $4) RETURNING *', [dispatch_id, workshop_id, qty_sewn, qty_delivered]); 
+  res.json(r.rows[0]); 
+});
+
+// --- Financials ---
 app.get('/api/wages', async (req, res) => { const r = await pool.query('SELECT * FROM wage_ledger'); res.json(r.rows); });
 app.get('/api/payments', async (req, res) => { const r = await pool.query('SELECT * FROM payments'); res.json(r.rows); });
+app.post('/api/payments', async (req, res) => { const { workshop_id, amount, method } = req.body; const r = await pool.query('INSERT INTO payments (workshop_id, amount, method) VALUES ($1, $2, $3) RETURNING *', [workshop_id, amount, method]); res.json(r.rows[0]); });
+
+// --- Setup Admin (Temporary) ---
+app.get('/api/setup-admin', async (req, res) => {
+  const { email } = req.query;
+  try {
+    const result = await pool.query("UPDATE users SET role = 'manager' WHERE email = $1 RETURNING *", [email]);
+    if (result.rows.length === 0) return res.status(404).send('User not found');
+    res.send(`Success! User ${email} is now a manager. You can login now.`);
+  } catch (err) { res.status(500).send('Error updating user'); }
+});
+
+// --- Reset Users (Temporary) ---
+app.get('/api/reset-users', async (req, res) => {
+  try {
+    await pool.query('DELETE FROM users');
+    res.send('All users deleted successfully. You can now go to the app and create a fresh admin.');
+  } catch (err) { res.status(500).send('Error deleting users'); }
+});
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
