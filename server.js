@@ -85,7 +85,6 @@ app.post('/api/login', async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// --- مدیریت کاربران ---
 app.get('/api/admin/users', authenticateToken, async (req, res) => {
   if (req.user.role !== 'admin') return res.status(403).json({ error: 'Admin only' });
   const result = await pool.query('SELECT id, username, email, role, workshop_id, created_at FROM users ORDER BY id DESC');
@@ -105,7 +104,6 @@ app.post('/api/admin/users', authenticateToken, async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// مسیر جدید: ویرایش اطلاعات کاربر
 app.put('/api/admin/users/:id', authenticateToken, async (req, res) => {
   if (req.user.role !== 'admin') return res.status(403).json({ error: 'Admin only' });
   const { id } = req.params;
@@ -141,7 +139,9 @@ app.delete('/api/admin/users/:id', authenticateToken, async (req, res) => {
   res.json({ message: 'Deleted' });
 });
 
-// --- همگام‌سازی داده‌ها ---
+// ==========================================
+// همگام‌سازی داده‌ها (Store)
+// ==========================================
 app.get('/api/store/:collection', authenticateToken, async (req, res) => {
   try {
     const result = await pool.query('SELECT id, json FROM app_rows WHERE collection = $1', [req.params.collection]);
@@ -167,6 +167,108 @@ app.delete('/api/store/:collection/:id', authenticateToken, async (req, res) => 
     await pool.query('DELETE FROM app_rows WHERE id = $1', [req.params.id]);
     res.json({ message: 'Deleted' });
   } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// ==========================================
+// قابلیت‌های جدید: ریست و پاکسازی (فقط ادمین)
+// ==========================================
+
+// ۱. ریست کامل یک کارگاه (حذف تمام حواله‌ها، دوخت‌ها، پرداخت‌ها و...)
+app.delete('/api/admin/reset-workshop/:workshopId', authenticateToken, async (req, res) => {
+  if (req.user.role !== 'admin') return res.status(403).json({ error: 'Admin only' });
+  const { workshopId } = req.params;
+  
+  try {
+    // پیدا کردن شناسه حواله‌های این کارگاه
+    const dispatchResult = await pool.query(
+      `SELECT id FROM app_rows WHERE collection = 'dispatches' AND (json->>'workshop_id' = $1 OR json->>'workshopId' = $1)`,
+      [workshopId]
+    );
+    const dispatchIds = dispatchResult.rows.map(r => r.id);
+    
+    // پیدا کردن شناسه تحویل‌های این کارگاه
+    const deliveryResult = await pool.query(
+      `SELECT id FROM app_rows WHERE collection = 'sewing_deliveries' AND (json->>'workshop_id' = $1 OR json->>'workshopId' = $1)`,
+      [workshopId]
+    );
+    const deliveryIds = deliveryResult.rows.map(r => r.id);
+    
+    // پیدا کردن شناسه پرداخت‌های این کارگاه
+    const paymentResult = await pool.query(
+      `SELECT id FROM app_rows WHERE collection = 'payments' AND (json->>'workshop_id' = $1 OR json->>'workshopId' = $1)`,
+      [workshopId]
+    );
+    const paymentIds = paymentResult.rows.map(r => r.id);
+    
+    // حذف رکوردهای وابسته به حواله‌ها
+    if (dispatchIds.length > 0) {
+      await pool.query(
+        `DELETE FROM app_rows WHERE collection IN ('dispatch_lines', 'workshop_receipts', 'cut_defects', 'dispatch_size_qty') 
+         AND (json->>'dispatch_id' = ANY($1) OR json->>'dispatchId' = ANY($1))`,
+        [dispatchIds]
+      );
+    }
+    
+    // حذف ردیف‌های تحویل
+    if (deliveryIds.length > 0) {
+      await pool.query(
+        `DELETE FROM app_rows WHERE collection = 'sewing_delivery_lines' 
+         AND (json->>'delivery_id' = ANY($1) OR json->>'deliveryId' = ANY($1))`,
+        [deliveryIds]
+      );
+    }
+    
+    // حذف تخصیص‌های پرداخت
+    if (paymentIds.length > 0) {
+      await pool.query(
+        `DELETE FROM app_rows WHERE collection = 'payment_allocations' 
+         AND (json->>'payment_id' = ANY($1) OR json->>'paymentId' = ANY($1))`,
+        [paymentIds]
+      );
+    }
+    
+    // حذف رکوردهای اصلی با workshop_id
+    await pool.query(
+      `DELETE FROM app_rows 
+       WHERE collection IN ('dispatches', 'sewing_deliveries', 'repair_returns', 'wage_ledger', 'payments') 
+       AND (json->>'workshop_id' = $1 OR json->>'workshopId' = $1)`,
+      [workshopId]
+    );
+    
+    res.json({ 
+      message: 'Workshop reset successfully', 
+      workshopId,
+      deletedDispatches: dispatchIds.length,
+      deletedDeliveries: deliveryIds.length,
+      deletedPayments: paymentIds.length
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ۲. پاک کردن تمام تراکنش‌ها (برای شروع از صفر - فقط ادمین)
+app.delete('/api/admin/clear-all-transactions', authenticateToken, async (req, res) => {
+  if (req.user.role !== 'admin') return res.status(403).json({ error: 'Admin only' });
+  
+  const transactionalCollections = [
+    'dispatches', 'dispatch_lines', 'dispatch_size_qty',
+    'workshop_receipts', 'workshop_receipt_lines',
+    'sewing_deliveries', 'sewing_delivery_lines',
+    'cut_defects', 'repair_returns',
+    'wage_ledger', 'payments', 'payment_allocations',
+    'adjustments', 'sync_queue', 'audit_log'
+  ];
+  
+  try {
+    const result = await pool.query(
+      'DELETE FROM app_rows WHERE collection = ANY($1)',
+      [transactionalCollections]
+    );
+    res.json({ message: `Cleared ${result.rowCount} transaction records` });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
 const PORT = process.env.PORT || 3000;
