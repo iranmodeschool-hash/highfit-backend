@@ -135,14 +135,12 @@ app.delete('/api/store/:collection/:id', auth, async (req, res) => {
 });
 
 // ==========================================
-// 🆕 API اختصاصی برای Dropdown مرجوعی (اطلاعات تمیز)
+// API اختصاصی برای Dropdown مرجوعی
 // ==========================================
 app.get('/api/delivery-lines-for-return', auth, async (req, res) => {
   try {
     const isAdmin = req.user.role === 'admin';
     const wid = req.user.workshop_id;
-    
-    // خواندن همه دیتای مورد نیاز
     const deliveries = await pool.query(`SELECT json FROM app_rows WHERE collection='sewing_deliveries'`);
     const deliveryLines = await pool.query(`SELECT json FROM app_rows WHERE collection='sewing_delivery_lines'`);
     const dispatchLines = await pool.query(`SELECT json FROM app_rows WHERE collection='dispatch_lines'`);
@@ -160,7 +158,7 @@ app.get('/api/delivery-lines-for-return', auth, async (req, res) => {
       const delivery = deliveriesMap[line.delivery_id || line.deliveryId];
       if (!delivery) continue;
       if (!isAdmin && wid && String(delivery.workshop_id || delivery.workshopId) !== String(wid)) continue;
-      if (parseInt(line.qty_accepted || 0) <= 0) continue; // فقط ردیف‌های تایید شده
+      if (parseInt(line.qty_accepted || 0) <= 0) continue;
 
       const dLine = dispatchLinesMap[line.dispatch_line_id || line.dispatchLineId] || {};
       const product = productsMap[dLine.product_id || dLine.productId] || {};
@@ -169,7 +167,6 @@ app.get('/api/delivery-lines-for-return', auth, async (req, res) => {
       const currentAccepted = parseInt(line.qty_accepted || 0);
       const alreadyReturned = parseInt(line.qty_returned_pending || 0);
       const maxReturnable = currentAccepted - alreadyReturned;
-
       if (maxReturnable <= 0) continue;
 
       result.push({
@@ -187,9 +184,8 @@ app.get('/api/delivery-lines-for-return', auth, async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-
 // ==========================================
-// آمار داشبورد و هشدارها
+// آمار داشبورد و هشدارها (اصلاح‌شده)
 // ==========================================
 app.get('/api/dashboard/stats', auth, async (req, res) => {
   try {
@@ -200,6 +196,8 @@ app.get('/api/dashboard/stats', auth, async (req, res) => {
     const dispatchQtyRes = await pool.query(`SELECT COALESCE(SUM((json->>'qty')::int), 0) as total FROM app_rows, jsonb_array_elements(json->'lines') l WHERE collection='dispatches' AND (json->>'status' != 'draft') ${filter}`);
     const cutDefectsRes = await pool.query(`SELECT COALESCE(SUM((json->>'declared_qty')::int), 0) as total FROM app_rows WHERE collection='cut_defects' AND json->>'status' IN ('pending', 'reviewed') ${filter}`);
     const deliveryRes = await pool.query(`SELECT COALESCE(SUM((json->>'qty_delivered')::int), 0) as total FROM app_rows, jsonb_array_elements(json->'lines') l WHERE collection='sewing_deliveries' AND (json->>'status' != 'draft') ${filter}`);
+    
+    // ⬇️ اصلاح نام متغیر در این خط انجام شد
     const returnRes = await pool.query(`SELECT COALESCE(SUM((json->>'qty_original')::int), 0) as total FROM app_rows WHERE collection='repair_returns' AND json->>'status' IN ('pending_workshop_report', 'pending_admin_decision', 'completed') ${filter}`);
 
     const [users, workshops, products, pendingReturns, pendingDefects, totalWage, scrapTotal] = await Promise.all([
@@ -215,7 +213,9 @@ app.get('/api/dashboard/stats', auth, async (req, res) => {
     const rawDispatch = parseInt(dispatchQtyRes.rows[0].total) || 0;
     const liveDefects = parseInt(cutDefectsRes.rows[0].total) || 0;
     const rawDelivery = parseInt(deliveryRes.rows[0].total) || 0;
-    const liveReturns = parseInt(returnQtyRes.rows[0].total) || 0;
+    
+    // ⬇️ استفاده از متغیر اصلاح شده
+    const liveReturns = parseInt(returnRes.rows[0].total) || 0;
 
     res.json({
       users: parseInt(users.rows[0].count), workshops: parseInt(workshops.rows[0].count), products: parseInt(products.rows[0].count),
@@ -254,7 +254,7 @@ app.get('/api/dashboard/alerts', auth, async (req, res) => {
 });
 
 // ==========================================
-// سایر APIها (خرابی، مرجوعی، چت)
+// سایر APIها
 // ==========================================
 app.put('/api/cut-defects/:id/decide', auth, async (req, res) => {
   if (req.user.role !== 'admin') return res.status(403).json({ error: 'Admin only' });
