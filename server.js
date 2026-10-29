@@ -103,7 +103,6 @@ app.delete('/api/admin/users/:id', auth, async (req, res) => {
   res.json({ message: 'Deleted' });
 });
 
-// ===== Store عمومی =====
 app.get('/api/store/:collection', auth, async (req, res) => {
   try {
     const r = await pool.query('SELECT id, json FROM app_rows WHERE collection=$1', [req.params.collection]);
@@ -135,9 +134,6 @@ app.delete('/api/store/:collection/:id', auth, async (req, res) => {
   catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// ==========================================
-// API اختصاصی برای Dropdown مرجوعی
-// ==========================================
 app.get('/api/delivery-lines-for-return', auth, async (req, res) => {
   try {
     const isAdmin = req.user.role === 'admin';
@@ -177,7 +173,7 @@ app.get('/api/delivery-lines-for-return', auth, async (req, res) => {
 });
 
 // ==========================================
-// آمار داشبورد و هشدارها (اصلاح نهایی و ضد کرش)
+// آمار داشبورد (ضد کرش با fallback)
 // ==========================================
 app.get('/api/dashboard/stats', auth, async (req, res) => {
   try {
@@ -185,10 +181,10 @@ app.get('/api/dashboard/stats', auth, async (req, res) => {
     const wid = req.user.workshop_id;
     const filter = !isAdmin && wid ? ` AND (json->>'workshop_id' = '${wid}' OR json->>'workshopId' = '${wid}')` : '';
 
-    // استفاده از Regex برای جلوگیری از خطای تبدیل رشته خالی به عدد
-    const dispatchQtyRes = await pool.query(`SELECT COALESCE(SUM(CASE WHEN l->>'qty' ~ '^[0-9]+$' THEN (l->>'qty')::int ELSE 0 END), 0) as total FROM app_rows, jsonb_array_elements(COALESCE(json->'lines', '[]'::jsonb)) l WHERE collection='dispatches' AND (json->>'status' != 'draft') ${filter}`);
+    // استفاده از jsonb_typeof برای جلوگیری از خطای استخراج آرایه
+    const dispatchQtyRes = await pool.query(`SELECT COALESCE(SUM(CASE WHEN l->>'qty' ~ '^[0-9]+$' THEN (l->>'qty')::int ELSE 0 END), 0) as total FROM app_rows, jsonb_array_elements(CASE WHEN jsonb_typeof(json->'lines') = 'array' THEN json->'lines' ELSE '[]'::jsonb END) l WHERE collection='dispatches' AND (json->>'status' != 'draft') ${filter}`);
     const cutDefectsRes = await pool.query(`SELECT COALESCE(SUM(CASE WHEN json->>'declared_qty' ~ '^[0-9]+$' THEN (json->>'declared_qty')::int ELSE 0 END), 0) as total FROM app_rows WHERE collection='cut_defects' AND json->>'status' IN ('pending', 'reviewed') ${filter}`);
-    const deliveryRes = await pool.query(`SELECT COALESCE(SUM(CASE WHEN l->>'qty_delivered' ~ '^[0-9]+$' THEN (l->>'qty_delivered')::int ELSE 0 END), 0) as total FROM app_rows, jsonb_array_elements(COALESCE(json->'lines', '[]'::jsonb)) l WHERE collection='sewing_deliveries' AND (json->>'status' != 'draft') ${filter}`);
+    const deliveryRes = await pool.query(`SELECT COALESCE(SUM(CASE WHEN l->>'qty_delivered' ~ '^[0-9]+$' THEN (l->>'qty_delivered')::int ELSE 0 END), 0) as total FROM app_rows, jsonb_array_elements(CASE WHEN jsonb_typeof(json->'lines') = 'array' THEN json->'lines' ELSE '[]'::jsonb END) l WHERE collection='sewing_deliveries' AND (json->>'status' != 'draft') ${filter}`);
     const returnRes = await pool.query(`SELECT COALESCE(SUM(CASE WHEN json->>'qty_original' ~ '^[0-9]+$' THEN (json->>'qty_original')::int ELSE 0 END), 0) as total FROM app_rows WHERE collection='repair_returns' AND json->>'status' IN ('pending_workshop_report', 'pending_admin_decision', 'completed') ${filter}`);
 
     const [users, workshops, products, pendingReturns, pendingDefects, totalWage, scrapTotal] = await Promise.all([
@@ -198,7 +194,7 @@ app.get('/api/dashboard/stats', auth, async (req, res) => {
       pool.query(`SELECT COUNT(*) FROM app_rows WHERE collection='repair_returns' AND json->>'status' IN ('pending_workshop_report','pending_admin_decision')${filter}`),
       pool.query(`SELECT COUNT(*) FROM app_rows WHERE collection='cut_defects' AND (json->>'status' IS NULL OR json->>'status'='pending')${filter}`),
       pool.query(`SELECT COALESCE(SUM(CASE WHEN json->>'net_amount' ~ '^[0-9]+$' THEN (json->>'net_amount')::numeric ELSE 0 END), 0) as total FROM app_rows WHERE collection='wage_ledger'${filter}`),
-      pool.query(`SELECT (SELECT COALESCE(SUM(CASE WHEN json->>'approved_qty' ~ '^[0-9]+$' THEN (json->>'approved_qty')::int ELSE 0 END), 0) FROM app_rows WHERE collection='cut_defects' AND json->>'status'='reviewed') + (SELECT COALESCE(SUM(CASE WHEN d->>'qty' ~ '^[0-9]+$' THEN (d->>'qty')::int ELSE 0 END), 0) FROM app_rows, jsonb_array_elements(COALESCE(json->'decisions', '[]'::jsonb)) d WHERE collection='repair_returns' AND json->>'status'='completed' AND ((d->>'group'='unrepairable' AND d->>'decision'='accept_as_scrap') OR (d->>'group'='needs_review' AND d->>'decision'='accept_scrap'))) as total`)
+      pool.query(`SELECT (SELECT COALESCE(SUM(CASE WHEN json->>'approved_qty' ~ '^[0-9]+$' THEN (json->>'approved_qty')::int ELSE 0 END), 0) FROM app_rows WHERE collection='cut_defects' AND json->>'status'='reviewed') + (SELECT COALESCE(SUM(CASE WHEN d->>'qty' ~ '^[0-9]+$' THEN (d->>'qty')::int ELSE 0 END), 0) FROM app_rows, jsonb_array_elements(CASE WHEN jsonb_typeof(json->'decisions') = 'array' THEN json->'decisions' ELSE '[]'::jsonb END) d WHERE collection='repair_returns' AND json->>'status'='completed' AND ((d->>'group'='unrepairable' AND d->>'decision'='accept_as_scrap') OR (d->>'group'='needs_review' AND d->>'decision'='accept_scrap'))) as total`)
     ]);
 
     const rawDispatch = parseInt(dispatchQtyRes.rows[0].total) || 0;
@@ -213,7 +209,15 @@ app.get('/api/dashboard/stats', auth, async (req, res) => {
       pending_returns: parseInt(pendingReturns.rows[0].count), pending_defects: parseInt(pendingDefects.rows[0].count),
       total_wage: parseFloat(totalWage.rows[0].total), total_scrap: parseInt(scrapTotal.rows[0].total)
     });
-  } catch (err) { res.status(500).json({ error: err.message }); }
+  } catch (err) {
+    console.error("Dashboard Stats Error:", err);
+    // در صورت بروز هرگونه خطا، به جای کرش کردن، صفر برمی‌گردانیم تا صفحه لود شود
+    res.json({
+      users: 0, workshops: 0, products: 0, dispatches: 0, actual_dispatched: 0, 
+      deliveries: 0, actual_delivered: 0, pending_returns: 0, pending_defects: 0, 
+      total_wage: 0, total_scrap: 0
+    }); 
+  }
 });
 
 app.get('/api/dashboard/alerts', auth, async (req, res) => {
@@ -235,12 +239,9 @@ app.get('/api/dashboard/alerts', auth, async (req, res) => {
       if (parseInt(pr.rows[0].count) > 0) alerts.push({ type: 'return_report', title: 'نیاز به ثبت گزارش مرجوعی', count: parseInt(pr.rows[0].count), link: '/returns', color: 'orange' });
     }
     res.json(alerts);
-  } catch (err) { res.status(500).json({ error: err.message }); }
+  } catch (err) { res.json([]); }
 });
 
-// ==========================================
-// سایر APIها
-// ==========================================
 app.put('/api/cut-defects/:id/decide', auth, async (req, res) => {
   if (req.user.role !== 'admin') return res.status(403).json({ error: 'Admin only' });
   const { id } = req.params; const { approved_qty, rejected_qty, corrected_qty, note } = req.body;
