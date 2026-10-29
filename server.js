@@ -5,12 +5,19 @@ const jwt = require('jsonwebtoken');
 const cors = require('cors');
 require('dotenv').config();
 
-process.on('unhandledRejection', (reason) => console.error('Unhandled:', reason));
-process.on('uncaughtException', (err) => console.error('Uncaught:', err));
+// 🛡️ محافظ‌های سراسری برای جلوگیری از کرش کردن سرور
+process.on('unhandledRejection', (reason) => console.error('Unhandled Rejection:', reason));
+process.on('uncaughtException', (err) => console.error('Uncaught Exception:', err));
 
 const app = express();
 app.use(express.json({ limit: '50mb' }));
 app.use(cors());
+
+// محافظ خطای Express
+app.use((err, req, res, next) => {
+  console.error('Express Error:', err);
+  res.status(500).json({ error: 'Internal Server Error', details: err.message });
+});
 
 const pool = new Pool({
   host: process.env.DB_HOST || 'localhost',
@@ -132,9 +139,34 @@ app.get('/api/store/:collection', auth, async (req, res) => {
 
 app.post('/api/store/:collection', auth, async (req, res) => {
   try {
+    const collection = req.params.collection;
     const data = req.body;
     const id = data.id || Date.now().toString();
-    await pool.query('INSERT INTO app_rows (id, collection, json) VALUES ($1,$2,$3) ON CONFLICT (id) DO UPDATE SET json=EXCLUDED.json', [id, req.params.collection, data]);
+
+    // 🛡️ اعتبارسنجی برای جلوگیری از ثبت دوخت بیش از حد مجاز
+    if (collection === 'sewing_delivery_lines' && data.dispatch_line_id) {
+      const dlRow = await pool.query(`SELECT json FROM app_rows WHERE id=$1 AND collection='dispatch_lines'`, [data.dispatch_line_id]);
+      if (dlRow.rows.length > 0) {
+        const dl = dlRow.rows[0].json;
+        const received = parseInt(dl.qty_received || dl.qty_dispatched || 0);
+        const approvedScrap = parseInt(dl.qty_approved_defects || 0);
+        const maxSewable = Math.max(0, received - approvedScrap);
+        
+        // محاسبه مجموع دوخته شده‌های قبلی برای این ردیف حواله (به جز رکورد فعلی که داره آپدیت میشه)
+        const existingLines = await pool.query(`SELECT json FROM app_rows WHERE collection='sewing_delivery_lines' AND json->>'dispatch_line_id' = $1 AND id != $2`, [data.dispatch_line_id, id]);
+        let totalSewnSoFar = 0;
+        for (const row of existingLines.rows) {
+          totalSewnSoFar += parseInt(row.json.qty_sewn || 0);
+        }
+        
+        const currentQtySewn = parseInt(data.qty_sewn || 0);
+        if (totalSewnSoFar + currentQtySewn > maxSewable) {
+          return res.status(400).json({ error: `تعداد دوخته شده کل (${totalSewnSoFar + currentQtySewn}) نمی‌تواند بیشتر از قابل دوخت (${maxSewable}) باشد.` });
+        }
+      }
+    }
+
+    await pool.query('INSERT INTO app_rows (id, collection, json) VALUES ($1,$2,$3) ON CONFLICT (id) DO UPDATE SET json=EXCLUDED.json', [id, collection, data]);
     res.json({ message: 'Saved', id });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
@@ -180,7 +212,7 @@ app.put('/api/cut-defects/:id/decide', auth, async (req, res) => {
 });
 
 // ==========================================
-// مرجوعی — گرفتن لیست (این بخش جدید اضافه شد)
+// مرجوعی — گرفتن لیست
 // ==========================================
 app.get('/api/repair-returns', auth, async (req, res) => {
   try {
