@@ -180,6 +180,16 @@ app.put('/api/cut-defects/:id/decide', auth, async (req, res) => {
 });
 
 // ==========================================
+// مرجوعی — گرفتن لیست (این بخش جدید اضافه شد)
+// ==========================================
+app.get('/api/repair-returns', auth, async (req, res) => {
+  try {
+    const r = await pool.query(`SELECT json FROM app_rows WHERE collection='repair_returns' ORDER BY (json->>'created_at') DESC`);
+    res.json(r.rows.map(x => x.json));
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// ==========================================
 // مرجوعی — ثبت توسط مدیر
 // ==========================================
 app.post('/api/repair-returns', auth, async (req, res) => {
@@ -295,7 +305,7 @@ app.put('/api/repair-returns/:id/decide', auth, async (req, res) => {
 });
 
 // ==========================================
-// گزارش ضایعات (اصلاح‌شده با COALESCE)
+// گزارش ضایعات
 // ==========================================
 app.get('/api/reports/scrap', auth, async (req, res) => {
   try {
@@ -312,11 +322,7 @@ app.get('/api/reports/scrap', auth, async (req, res) => {
       }
     }
     
-    const returnRows = await pool.query(`
-      SELECT json, COALESCE(json->'decisions', '[]'::jsonb) as decisions 
-      FROM app_rows 
-      WHERE collection='repair_returns' AND json->>'status'='completed'
-    `);
+    const returnRows = await pool.query(`SELECT json, COALESCE(json->'decisions', '[]'::jsonb) as decisions FROM app_rows WHERE collection='repair_returns' AND json->>'status'='completed'`);
     const scrapFromReturns = [];
     for (const row of returnRows.rows) {
       const r = row.json;
@@ -345,7 +351,7 @@ app.get('/api/reports/scrap', auth, async (req, res) => {
 });
 
 // ==========================================
-// آمار داشبورد (اصلاح‌شده با COALESCE)
+// آمار داشبورد
 // ==========================================
 app.get('/api/dashboard/stats', auth, async (req, res) => {
   try {
