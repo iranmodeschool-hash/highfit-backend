@@ -5,6 +5,14 @@ const jwt = require('jsonwebtoken');
 const cors = require('cors');
 require('dotenv').config();
 
+// مدیریت خطاهای پیش‌بینی نشده (برای جلوگیری از کرش سرور)
+process.on('unhandledRejection', (reason, promise) => {
+  console.error('Unhandled Rejection at:', promise, 'reason:', reason);
+});
+process.on('uncaughtException', (err) => {
+  console.error('Uncaught Exception thrown:', err);
+});
+
 const app = express();
 app.use(express.json({ limit: '50mb' }));
 app.use(cors());
@@ -15,7 +23,10 @@ const pool = new Pool({
   user: process.env.DB_USER || 'root',
   password: process.env.DB_PASSWORD,
   database: process.env.DB_NAME || 'highfit-core-db',
-  ssl: process.env.DB_HOST ? false : { rejectUnauthorized: false }
+  ssl: process.env.DB_HOST ? false : { rejectUnauthorized: false },
+  max: 5, // محدود کردن تعداد اتصال‌ها برای جلوگیری از کمبود منابع
+  idleTimeoutMillis: 30000,
+  connectionTimeoutMillis: 2000,
 });
 
 const createTables = async () => {
@@ -32,6 +43,10 @@ const createTables = async () => {
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       );
     `);
+
+    // ⬇️ این خط حیاتی است: ستون را به جدولِ از قبل موجود اضافه می‌کند تا خطای 502 برطرف شود
+    await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS allowed_apps JSONB DEFAULT '["doakhtyar"]'::jsonb;`);
+
     await pool.query(`
       CREATE TABLE IF NOT EXISTS app_rows (
         id VARCHAR(100) PRIMARY KEY,
@@ -40,8 +55,8 @@ const createTables = async () => {
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       );
     `);
-    console.log("Tables are ready");
-  } catch (err) { console.error(err); }
+    console.log("Tables are ready and updated");
+  } catch (err) { console.error("Error creating tables:", err); }
 };
 createTables();
 
@@ -95,8 +110,10 @@ app.post('/api/login', async (req, res) => {
 
 app.get('/api/admin/users', authenticateToken, async (req, res) => {
   if (req.user.role !== 'admin') return res.status(403).json({ error: 'Admin only' });
-  const result = await pool.query('SELECT id, username, email, role, workshop_id, allowed_apps, created_at FROM users ORDER BY id DESC');
-  res.json(result.rows);
+  try {
+    const result = await pool.query('SELECT id, username, email, role, workshop_id, allowed_apps, created_at FROM users ORDER BY id DESC');
+    res.json(result.rows);
+  } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
 app.post('/api/admin/users', authenticateToken, async (req, res) => {
@@ -128,8 +145,10 @@ app.put('/api/admin/users/:id', authenticateToken, async (req, res) => {
 
 app.put('/api/admin/users/:id/role', authenticateToken, async (req, res) => {
   if (req.user.role !== 'admin') return res.status(403).json({ error: 'Admin only' });
-  const result = await pool.query('UPDATE users SET role = $1 WHERE id = $2 RETURNING id, username, email, role', [req.body.role, req.params.id]);
-  res.json(result.rows[0]);
+  try {
+    const result = await pool.query('UPDATE users SET role = $1 WHERE id = $2 RETURNING id, username, email, role', [req.body.role, req.params.id]);
+    res.json(result.rows[0]);
+  } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
 app.put('/api/admin/users/:id/password', authenticateToken, async (req, res) => {
@@ -143,8 +162,10 @@ app.put('/api/admin/users/:id/password', authenticateToken, async (req, res) => 
 
 app.delete('/api/admin/users/:id', authenticateToken, async (req, res) => {
   if (req.user.role !== 'admin') return res.status(403).json({ error: 'Admin only' });
-  await pool.query('DELETE FROM users WHERE id = $1', [req.params.id]);
-  res.json({ message: 'Deleted' });
+  try {
+    await pool.query('DELETE FROM users WHERE id = $1', [req.params.id]);
+    res.json({ message: 'Deleted' });
+  } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
 app.get('/api/store/:collection', authenticateToken, async (req, res) => {
@@ -208,11 +229,7 @@ app.delete('/api/admin/clear-all-transactions', authenticateToken, async (req, r
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// ==========================================
-// بخش جدید: چت آنلاین (Chat)
-// ==========================================
-
-// ارسال پیام
+// --- چت آنلاین ---
 app.post('/api/chat/send', authenticateToken, async (req, res) => {
   const { receiver_id, text } = req.body;
   const sender_id = req.user.id;
@@ -228,7 +245,6 @@ app.post('/api/chat/send', authenticateToken, async (req, res) => {
       is_read: false,
       created_at: new Date().toISOString()
     };
-    
     await pool.query(
       `INSERT INTO app_rows (id, collection, json) VALUES ($1, $2, $3)`,
       [messageId, 'messages', messageData]
@@ -237,13 +253,11 @@ app.post('/api/chat/send', authenticateToken, async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// دریافت پیام‌های بین دو کاربر
 app.get('/api/chat/messages/:contactId', authenticateToken, async (req, res) => {
   const myId = req.user.id;
   const contactId = req.params.contactId;
 
   try {
-    // خواندن پیام‌هایی که بین من و مخاطب رد و بدل شده
     const result = await pool.query(
       `SELECT json FROM app_rows 
        WHERE collection = 'messages' 
@@ -255,7 +269,6 @@ app.get('/api/chat/messages/:contactId', authenticateToken, async (req, res) => 
       [myId.toString(), contactId.toString()]
     );
     
-    // علامت گذاری به عنوان خوانده شده (پیام‌هایی که مخاطب به من فرستاده)
     await pool.query(
       `UPDATE app_rows SET json = jsonb_set(json, '{is_read}', 'true')
        WHERE collection = 'messages' 
@@ -267,13 +280,11 @@ app.get('/api/chat/messages/:contactId', authenticateToken, async (req, res) => 
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// دریافت لیست مخاطبین (برای مدیر که چه کسانی آنلاین هستند)
 app.get('/api/chat/contacts', authenticateToken, async (req, res) => {
   try {
     let query = 'SELECT id, username, role, workshop_id FROM users';
     let params = [];
     
-    // اگر مدیر نیست، فقط مدیر را ببیند
     if (req.user.role !== 'admin') {
       query += ' WHERE role = $1';
       params.push('admin');
@@ -281,6 +292,29 @@ app.get('/api/chat/contacts', authenticateToken, async (req, res) => {
 
     const result = await pool.query(query, params);
     res.json(result.rows);
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// --- آمار داشبورد (تک درخواست برای جلوگیری از 502) ---
+app.get('/api/dashboard/stats', authenticateToken, async (req, res) => {
+  try {
+    const [users, workshops, products, dispatches, deliveries, defects] = await Promise.all([
+      pool.query('SELECT COUNT(*) FROM users'),
+      pool.query(`SELECT COUNT(*) FROM app_rows WHERE collection = 'workshops'`),
+      pool.query(`SELECT COUNT(*) FROM app_rows WHERE collection = 'products'`),
+      pool.query(`SELECT COUNT(*) FROM app_rows WHERE collection = 'dispatches'`),
+      pool.query(`SELECT COUNT(*) FROM app_rows WHERE collection = 'sewing_deliveries'`),
+      pool.query(`SELECT COUNT(*) FROM app_rows WHERE collection = 'cut_defects'`)
+    ]);
+
+    res.json({
+      users: parseInt(users.rows[0].count),
+      workshops: parseInt(workshops.rows[0].count),
+      products: parseInt(products.rows[0].count),
+      dispatches: parseInt(dispatches.rows[0].count),
+      deliveries: parseInt(deliveries.rows[0].count),
+      defects: parseInt(defects.rows[0].count)
+    });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
