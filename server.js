@@ -28,6 +28,7 @@ const createTables = async () => {
         password_hash VARCHAR(255) NOT NULL,
         role VARCHAR(30) DEFAULT 'workshop_manager',
         workshop_id VARCHAR(50),
+        allowed_apps JSONB DEFAULT '["doakhtyar"]'::jsonb,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       );
     `);
@@ -66,13 +67,13 @@ app.get('/api/force-create-admin', async (req, res) => {
       await pool.query("UPDATE users SET role = 'admin', password_hash = $1 WHERE email = $2", [hashedPassword, email]);
       return res.send(`Admin password reset.`);
     }
-    await pool.query('INSERT INTO users (username, email, password_hash, role) VALUES ($1, $2, $3, $4)', ['HAMID', email, hashedPassword, 'admin']);
+    await pool.query('INSERT INTO users (username, email, password_hash, role, allowed_apps) VALUES ($1, $2, $3, $4, $5)', ['HAMID', email, hashedPassword, 'admin', '["doakhtyar", "petty_cash"]']);
     res.send(`Success! New admin created.`);
   } catch (err) { res.status(500).send(err.message); }
 });
 
 app.post('/api/login', async (req, res) => {
-  const { email, password } = req.body;
+  const { email, password, app_name } = req.body;
   try {
     const result = await pool.query('SELECT * FROM users WHERE email = $1', [email]);
     if (result.rows.length === 0) return res.status(401).json({ error: 'Invalid credentials' });
@@ -80,25 +81,32 @@ app.post('/api/login', async (req, res) => {
     const validPassword = await bcrypt.compare(password, user.password_hash);
     if (!validPassword) return res.status(401).json({ error: 'Invalid credentials' });
 
+    if (app_name && user.role !== 'admin') {
+      const allowedApps = user.allowed_apps || [];
+      if (!allowedApps.includes(app_name)) {
+        return res.status(403).json({ error: `شما به اپلیکیشن ${app_name} دسترسی ندارید.` });
+      }
+    }
+
     const token = jwt.sign({ id: user.id, role: user.role, workshop_id: user.workshop_id }, process.env.JWT_SECRET || 'super-secret-key', { expiresIn: '1d' });
-    res.json({ token, user: { id: user.id, username: user.username, email: user.email, role: user.role, workshop_id: user.workshop_id } });
+    res.json({ token, user: { id: user.id, username: user.username, email: user.email, role: user.role, workshop_id: user.workshop_id, allowed_apps: user.allowed_apps } });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
 app.get('/api/admin/users', authenticateToken, async (req, res) => {
   if (req.user.role !== 'admin') return res.status(403).json({ error: 'Admin only' });
-  const result = await pool.query('SELECT id, username, email, role, workshop_id, created_at FROM users ORDER BY id DESC');
+  const result = await pool.query('SELECT id, username, email, role, workshop_id, allowed_apps, created_at FROM users ORDER BY id DESC');
   res.json(result.rows);
 });
 
 app.post('/api/admin/users', authenticateToken, async (req, res) => {
   if (req.user.role !== 'admin') return res.status(403).json({ error: 'Admin only' });
-  const { username, email, password, role, workshop_id } = req.body;
+  const { username, email, password, role, workshop_id, allowed_apps } = req.body;
   try {
     const hashedPassword = await bcrypt.hash(password, 10);
     const result = await pool.query(
-      'INSERT INTO users (username, email, password_hash, role, workshop_id) VALUES ($1, $2, $3, $4, $5) RETURNING id, username, email, role, workshop_id',
-      [username, email, hashedPassword, role || 'workshop_manager', workshop_id || null]
+      'INSERT INTO users (username, email, password_hash, role, workshop_id, allowed_apps) VALUES ($1, $2, $3, $4, $5, $6) RETURNING id, username, email, role, workshop_id, allowed_apps',
+      [username, email, hashedPassword, role || 'workshop_manager', workshop_id || null, allowed_apps || '["doakhtyar"]']
     );
     res.status(201).json(result.rows[0]);
   } catch (err) { res.status(500).json({ error: err.message }); }
@@ -107,11 +115,11 @@ app.post('/api/admin/users', authenticateToken, async (req, res) => {
 app.put('/api/admin/users/:id', authenticateToken, async (req, res) => {
   if (req.user.role !== 'admin') return res.status(403).json({ error: 'Admin only' });
   const { id } = req.params;
-  const { username, email, role, workshop_id } = req.body;
+  const { username, email, role, workshop_id, allowed_apps } = req.body;
   try {
     const result = await pool.query(
-      'UPDATE users SET username = $1, email = $2, role = $3, workshop_id = $4 WHERE id = $5 RETURNING id, username, email, role, workshop_id',
-      [username, email, role, workshop_id || null, id]
+      'UPDATE users SET username = $1, email = $2, role = $3, workshop_id = $4, allowed_apps = $5 WHERE id = $6 RETURNING id, username, email, role, workshop_id, allowed_apps',
+      [username, email, role, workshop_id || null, allowed_apps || '["doakhtyar"]', id]
     );
     if (result.rows.length === 0) return res.status(404).json({ error: 'User not found' });
     res.json(result.rows[0]);
@@ -139,9 +147,6 @@ app.delete('/api/admin/users/:id', authenticateToken, async (req, res) => {
   res.json({ message: 'Deleted' });
 });
 
-// ==========================================
-// همگام‌سازی داده‌ها (Store)
-// ==========================================
 app.get('/api/store/:collection', authenticateToken, async (req, res) => {
   try {
     const result = await pool.query('SELECT id, json FROM app_rows WHERE collection = $1', [req.params.collection]);
@@ -169,106 +174,114 @@ app.delete('/api/store/:collection/:id', authenticateToken, async (req, res) => 
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// ==========================================
-// قابلیت‌های جدید: ریست و پاکسازی (فقط ادمین)
-// ==========================================
-
-// ۱. ریست کامل یک کارگاه (حذف تمام حواله‌ها، دوخت‌ها، پرداخت‌ها و...)
 app.delete('/api/admin/reset-workshop/:workshopId', authenticateToken, async (req, res) => {
   if (req.user.role !== 'admin') return res.status(403).json({ error: 'Admin only' });
   const { workshopId } = req.params;
-  
   try {
-    // پیدا کردن شناسه حواله‌های این کارگاه
-    const dispatchResult = await pool.query(
-      `SELECT id FROM app_rows WHERE collection = 'dispatches' AND (json->>'workshop_id' = $1 OR json->>'workshopId' = $1)`,
-      [workshopId]
-    );
+    const dispatchResult = await pool.query(`SELECT id FROM app_rows WHERE collection = 'dispatches' AND (json->>'workshop_id' = $1 OR json->>'workshopId' = $1)`, [workshopId]);
     const dispatchIds = dispatchResult.rows.map(r => r.id);
-    
-    // پیدا کردن شناسه تحویل‌های این کارگاه
-    const deliveryResult = await pool.query(
-      `SELECT id FROM app_rows WHERE collection = 'sewing_deliveries' AND (json->>'workshop_id' = $1 OR json->>'workshopId' = $1)`,
-      [workshopId]
-    );
+    const deliveryResult = await pool.query(`SELECT id FROM app_rows WHERE collection = 'sewing_deliveries' AND (json->>'workshop_id' = $1 OR json->>'workshopId' = $1)`, [workshopId]);
     const deliveryIds = deliveryResult.rows.map(r => r.id);
-    
-    // پیدا کردن شناسه پرداخت‌های این کارگاه
-    const paymentResult = await pool.query(
-      `SELECT id FROM app_rows WHERE collection = 'payments' AND (json->>'workshop_id' = $1 OR json->>'workshopId' = $1)`,
-      [workshopId]
-    );
+    const paymentResult = await pool.query(`SELECT id FROM app_rows WHERE collection = 'payments' AND (json->>'workshop_id' = $1 OR json->>'workshopId' = $1)`, [workshopId]);
     const paymentIds = paymentResult.rows.map(r => r.id);
-    
-    // حذف رکوردهای وابسته به حواله‌ها
+
     if (dispatchIds.length > 0) {
-      await pool.query(
-        `DELETE FROM app_rows WHERE collection IN ('dispatch_lines', 'workshop_receipts', 'cut_defects', 'dispatch_size_qty') 
-         AND (json->>'dispatch_id' = ANY($1) OR json->>'dispatchId' = ANY($1))`,
-        [dispatchIds]
-      );
+      await pool.query(`DELETE FROM app_rows WHERE collection IN ('dispatch_lines', 'workshop_receipts', 'cut_defects', 'dispatch_size_qty') AND (json->>'dispatch_id' = ANY($1) OR json->>'dispatchId' = ANY($1))`, [dispatchIds]);
     }
-    
-    // حذف ردیف‌های تحویل
     if (deliveryIds.length > 0) {
-      await pool.query(
-        `DELETE FROM app_rows WHERE collection = 'sewing_delivery_lines' 
-         AND (json->>'delivery_id' = ANY($1) OR json->>'deliveryId' = ANY($1))`,
-        [deliveryIds]
-      );
+      await pool.query(`DELETE FROM app_rows WHERE collection = 'sewing_delivery_lines' AND (json->>'delivery_id' = ANY($1) OR json->>'deliveryId' = ANY($1))`, [deliveryIds]);
     }
-    
-    // حذف تخصیص‌های پرداخت
     if (paymentIds.length > 0) {
-      await pool.query(
-        `DELETE FROM app_rows WHERE collection = 'payment_allocations' 
-         AND (json->>'payment_id' = ANY($1) OR json->>'paymentId' = ANY($1))`,
-        [paymentIds]
-      );
+      await pool.query(`DELETE FROM app_rows WHERE collection = 'payment_allocations' AND (json->>'payment_id' = ANY($1) OR json->>'paymentId' = ANY($1))`, [paymentIds]);
     }
-    
-    // حذف رکوردهای اصلی با workshop_id
-    await pool.query(
-      `DELETE FROM app_rows 
-       WHERE collection IN ('dispatches', 'sewing_deliveries', 'repair_returns', 'wage_ledger', 'payments') 
-       AND (json->>'workshop_id' = $1 OR json->>'workshopId' = $1)`,
-      [workshopId]
-    );
-    
-    res.json({ 
-      message: 'Workshop reset successfully', 
-      workshopId,
-      deletedDispatches: dispatchIds.length,
-      deletedDeliveries: deliveryIds.length,
-      deletedPayments: paymentIds.length
-    });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
+    await pool.query(`DELETE FROM app_rows WHERE collection IN ('dispatches', 'sewing_deliveries', 'repair_returns', 'wage_ledger', 'payments') AND (json->>'workshop_id' = $1 OR json->>'workshopId' = $1)`, [workshopId]);
+    res.json({ message: 'Workshop reset successfully' });
+  } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// ۲. پاک کردن تمام تراکنش‌ها (برای شروع از صفر - فقط ادمین)
 app.delete('/api/admin/clear-all-transactions', authenticateToken, async (req, res) => {
   if (req.user.role !== 'admin') return res.status(403).json({ error: 'Admin only' });
-  
-  const transactionalCollections = [
-    'dispatches', 'dispatch_lines', 'dispatch_size_qty',
-    'workshop_receipts', 'workshop_receipt_lines',
-    'sewing_deliveries', 'sewing_delivery_lines',
-    'cut_defects', 'repair_returns',
-    'wage_ledger', 'payments', 'payment_allocations',
-    'adjustments', 'sync_queue', 'audit_log'
-  ];
-  
+  const transactionalCollections = ['dispatches', 'dispatch_lines', 'dispatch_size_qty', 'workshop_receipts', 'workshop_receipt_lines', 'sewing_deliveries', 'sewing_delivery_lines', 'cut_defects', 'repair_returns', 'wage_ledger', 'payments', 'payment_allocations', 'adjustments', 'sync_queue', 'audit_log'];
   try {
-    const result = await pool.query(
-      'DELETE FROM app_rows WHERE collection = ANY($1)',
-      [transactionalCollections]
-    );
+    const result = await pool.query('DELETE FROM app_rows WHERE collection = ANY($1)', [transactionalCollections]);
     res.json({ message: `Cleared ${result.rowCount} transaction records` });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// ==========================================
+// بخش جدید: چت آنلاین (Chat)
+// ==========================================
+
+// ارسال پیام
+app.post('/api/chat/send', authenticateToken, async (req, res) => {
+  const { receiver_id, text } = req.body;
+  const sender_id = req.user.id;
+  if (!receiver_id || !text) return res.status(400).json({ error: 'Receiver and text are required' });
+
+  try {
+    const messageId = 'msg_' + Date.now() + '_' + Math.random().toString(36).substr(2, 5);
+    const messageData = {
+      id: messageId,
+      sender_id,
+      receiver_id,
+      text,
+      is_read: false,
+      created_at: new Date().toISOString()
+    };
+    
+    await pool.query(
+      `INSERT INTO app_rows (id, collection, json) VALUES ($1, $2, $3)`,
+      [messageId, 'messages', messageData]
+    );
+    res.status(201).json(messageData);
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// دریافت پیام‌های بین دو کاربر
+app.get('/api/chat/messages/:contactId', authenticateToken, async (req, res) => {
+  const myId = req.user.id;
+  const contactId = req.params.contactId;
+
+  try {
+    // خواندن پیام‌هایی که بین من و مخاطب رد و بدل شده
+    const result = await pool.query(
+      `SELECT json FROM app_rows 
+       WHERE collection = 'messages' 
+       AND (
+         (json->>'sender_id' = $1 AND json->>'receiver_id' = $2) OR 
+         (json->>'sender_id' = $2 AND json->>'receiver_id' = $1)
+       )
+       ORDER BY (json->>'created_at') ASC`,
+      [myId.toString(), contactId.toString()]
+    );
+    
+    // علامت گذاری به عنوان خوانده شده (پیام‌هایی که مخاطب به من فرستاده)
+    await pool.query(
+      `UPDATE app_rows SET json = jsonb_set(json, '{is_read}', 'true')
+       WHERE collection = 'messages' 
+       AND json->>'sender_id' = $1 AND json->>'receiver_id' = $2 AND (json->>'is_read')::boolean = false`,
+      [contactId.toString(), myId.toString()]
+    );
+
+    res.json(result.rows.map(row => row.json));
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// دریافت لیست مخاطبین (برای مدیر که چه کسانی آنلاین هستند)
+app.get('/api/chat/contacts', authenticateToken, async (req, res) => {
+  try {
+    let query = 'SELECT id, username, role, workshop_id FROM users';
+    let params = [];
+    
+    // اگر مدیر نیست، فقط مدیر را ببیند
+    if (req.user.role !== 'admin') {
+      query += ' WHERE role = $1';
+      params.push('admin');
+    }
+
+    const result = await pool.query(query, params);
+    res.json(result.rows);
+  } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
 const PORT = process.env.PORT || 3000;
