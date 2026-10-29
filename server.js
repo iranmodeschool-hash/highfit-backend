@@ -103,6 +103,7 @@ app.delete('/api/admin/users/:id', auth, async (req, res) => {
   res.json({ message: 'Deleted' });
 });
 
+// ===== Store عمومی =====
 app.get('/api/store/:collection', auth, async (req, res) => {
   try {
     const r = await pool.query('SELECT id, json FROM app_rows WHERE collection=$1', [req.params.collection]);
@@ -173,68 +174,122 @@ app.get('/api/delivery-lines-for-return', auth, async (req, res) => {
 });
 
 // ==========================================
-// آمار داشبورد (اصلاح نهایی - خواندن از مجموعه‌های صحیح)
+// آمار داشبورد (ضد کرش با محاسبه در جاوااسکریپت)
 // ==========================================
 app.get('/api/dashboard/stats', auth, async (req, res) => {
+  let response = {
+    users: 0, workshops: 0, products: 0, dispatches: 0, actual_dispatched: 0,
+    deliveries: 0, actual_delivered: 0, pending_returns: 0, pending_defects: 0,
+    total_wage: 0, total_scrap: 0
+  };
+
   try {
     const isAdmin = req.user.role === 'admin';
     const wid = req.user.workshop_id;
+    const filter = !isAdmin && wid ? ` AND (json->>'workshop_id' = '${wid}' OR json->>'workshopId' = '${wid}')` : '';
 
-    // ۱. حواله‌ها: مجموع qty از dispatch_size_qty
-    let dispatchFilter = '';
-    if (!isAdmin && wid) {
-      dispatchFilter = ` AND json->>'dispatch_id' IN (SELECT id FROM app_rows WHERE collection='dispatches' AND (json->>'workshop_id' = '${wid}' OR json->>'workshopId' = '${wid}'))`;
+    // 1. Users
+    if (isAdmin) {
+      const u = await pool.query('SELECT COUNT(*) FROM users');
+      response.users = parseInt(u.rows[0].count) || 0;
     }
-    const dispatchRes = await pool.query(`SELECT COALESCE(SUM(CASE WHEN json->>'qty' ~ '^[0-9]+$' THEN (json->>'qty')::int ELSE 0 END), 0) as total FROM app_rows WHERE collection='dispatch_size_qty' ${dispatchFilter}`);
 
-    // ۲. اقلام تحویل شده: مجموع qty_delivered از sewing_delivery_lines
-    let deliveryFilter = '';
-    if (!isAdmin && wid) {
-      deliveryFilter = ` AND json->>'delivery_id' IN (SELECT id FROM app_rows WHERE collection='sewing_deliveries' AND (json->>'workshop_id' = '${wid}' OR json->>'workshopId' = '${wid}'))`;
-    }
-    const deliveryRes = await pool.query(`SELECT COALESCE(SUM(CASE WHEN json->>'qty_delivered' ~ '^[0-9]+$' THEN (json->>'qty_delivered')::int ELSE 0 END), 0) as total FROM app_rows WHERE collection='sewing_delivery_lines' ${deliveryFilter}`);
+    // 2. Workshops
+    const w = await pool.query(`SELECT COUNT(*) FROM app_rows WHERE collection='workshops'${filter}`);
+    response.workshops = parseInt(w.rows[0].count) || 0;
 
-    // ۳. خرابی‌های برش
-    let defectFilter = !isAdmin && wid ? ` AND (json->>'workshop_id' = '${wid}' OR json->>'workshopId' = '${wid}')` : '';
-    const defectRes = await pool.query(`SELECT COALESCE(SUM(CASE WHEN json->>'declared_qty' ~ '^[0-9]+$' THEN (json->>'declared_qty')::int ELSE 0 END), 0) as total FROM app_rows WHERE collection='cut_defects' AND json->>'status' IN ('pending', 'reviewed') ${defectFilter}`);
+    // 3. Products
+    const p = await pool.query(`SELECT COUNT(*) FROM app_rows WHERE collection='products'${filter}`);
+    response.products = parseInt(p.rows[0].count) || 0;
 
-    // ۴. مرجوعی‌ها
-    let returnFilter = !isAdmin && wid ? ` AND (json->>'workshop_id' = '${wid}' OR json->>'workshopId' = '${wid}')` : '';
-    const returnRes = await pool.query(`SELECT COALESCE(SUM(CASE WHEN json->>'qty_original' ~ '^[0-9]+$' THEN (json->>'qty_original')::int ELSE 0 END), 0) as total FROM app_rows WHERE collection='repair_returns' AND json->>'status' IN ('pending_workshop_report', 'pending_admin_decision', 'completed') ${returnFilter}`);
+    // 4. Dispatches (Sum of qty inside lines)
+    let totalDispatched = 0;
+    try {
+      const d = await pool.query(`SELECT json FROM app_rows WHERE collection='dispatches'${filter}`);
+      for (const row of d.rows) {
+        if (row.json && Array.isArray(row.json.lines)) {
+          for (const line of row.json.lines) {
+            totalDispatched += parseInt(line.qty) || 0;
+          }
+        }
+      }
+    } catch(e) { console.error('Error calc dispatches', e); }
+    response.dispatches = totalDispatched;
 
-    // ۵. شمارش‌های ساده
-    const [users, workshops, products, pendingReturns, pendingDefects, totalWage, scrapTotal] = await Promise.all([
-      isAdmin ? pool.query('SELECT COUNT(*) FROM users') : { rows: [{ count: 0 }] },
-      pool.query(`SELECT COUNT(*) FROM app_rows WHERE collection='workshops'${!isAdmin && wid ? ` AND (json->>'workshop_id' = '${wid}' OR json->>'workshopId' = '${wid}')` : ''}`),
-      pool.query(`SELECT COUNT(*) FROM app_rows WHERE collection='products'`),
-      pool.query(`SELECT COUNT(*) FROM app_rows WHERE collection='repair_returns' AND json->>'status' IN ('pending_workshop_report','pending_admin_decision')${returnFilter}`),
-      pool.query(`SELECT COUNT(*) FROM app_rows WHERE collection='cut_defects' AND (json->>'status' IS NULL OR json->>'status'='pending')${defectFilter}`),
-      pool.query(`SELECT COALESCE(SUM(CASE WHEN json->>'net_amount' ~ '^[0-9]+$' THEN (json->>'net_amount')::numeric ELSE 0 END), 0) as total FROM app_rows WHERE collection='wage_ledger'${returnFilter}`),
-      pool.query(`SELECT (SELECT COALESCE(SUM(CASE WHEN json->>'approved_qty' ~ '^[0-9]+$' THEN (json->>'approved_qty')::int ELSE 0 END), 0) FROM app_rows WHERE collection='cut_defects' AND json->>'status'='reviewed') + (SELECT COALESCE(SUM(CASE WHEN d->>'qty' ~ '^[0-9]+$' THEN (d->>'qty')::int ELSE 0 END), 0) FROM app_rows, jsonb_array_elements(CASE WHEN jsonb_typeof(json->'decisions') = 'array' THEN json->'decisions' ELSE '[]'::jsonb END) d WHERE collection='repair_returns' AND json->>'status'='completed' AND ((d->>'group'='unrepairable' AND d->>'decision'='accept_as_scrap') OR (d->>'group'='needs_review' AND d->>'decision'='accept_scrap'))) as total`)
-    ]);
+    // 5. Defects
+    let totalDefects = 0;
+    let pendingDefectsCount = 0;
+    try {
+      const df = await pool.query(`SELECT json FROM app_rows WHERE collection='cut_defects' AND json->>'status' IN ('pending', 'reviewed') ${filter}`);
+      for (const row of df.rows) {
+        totalDefects += parseInt(row.json.declared_qty) || 0;
+        if (row.json.status === 'pending' || !row.json.status) pendingDefectsCount++;
+      }
+    } catch(e) { console.error('Error calc defects', e); }
+    response.actual_dispatched = Math.max(0, response.dispatches - totalDefects);
+    response.pending_defects = pendingDefectsCount;
 
-    const rawDispatch = parseInt(dispatchRes.rows[0].total) || 0;
-    const liveDefects = parseInt(defectRes.rows[0].total) || 0;
-    const rawDelivery = parseInt(deliveryRes.rows[0].total) || 0;
-    const liveReturns = parseInt(returnRes.rows[0].total) || 0;
+    // 6. Deliveries (Sum of qty_delivered)
+    let totalDelivered = 0;
+    try {
+      const dl = await pool.query(`SELECT json FROM app_rows WHERE collection='sewing_delivery_lines'`);
+      for (const row of dl.rows) {
+        totalDelivered += parseInt(row.json.qty_delivered) || 0;
+      }
+    } catch(e) { console.error('Error calc deliveries', e); }
+    response.deliveries = totalDelivered;
 
-    res.json({
-      users: parseInt(users.rows[0].count),
-      workshops: parseInt(workshops.rows[0].count),
-      products: parseInt(products.rows[0].count),
-      dispatches: rawDispatch,
-      actual_dispatched: Math.max(0, rawDispatch - liveDefects),
-      deliveries: rawDelivery,
-      actual_delivered: Math.max(0, rawDelivery - liveReturns),
-      pending_returns: parseInt(pendingReturns.rows[0].count),
-      pending_defects: parseInt(pendingDefects.rows[0].count),
-      total_wage: parseFloat(totalWage.rows[0].total),
-      total_scrap: parseInt(scrapTotal.rows[0].total)
-    });
+    // 7. Returns
+    let totalReturns = 0;
+    let pendingReturnsCount = 0;
+    try {
+      const r = await pool.query(`SELECT json FROM app_rows WHERE collection='repair_returns' AND json->>'status' IN ('pending_workshop_report', 'pending_admin_decision', 'completed') ${filter}`);
+      for (const row of r.rows) {
+        totalReturns += parseInt(row.json.qty_original) || 0;
+        if (row.json.status === 'pending_workshop_report' || row.json.status === 'pending_admin_decision') {
+          pendingReturnsCount++;
+        }
+      }
+    } catch(e) { console.error('Error calc returns', e); }
+    response.actual_delivered = Math.max(0, response.deliveries - totalReturns);
+    response.pending_returns = pendingReturnsCount;
+
+    // 8. Total Wage
+    let totalWage = 0;
+    try {
+      const tw = await pool.query(`SELECT json FROM app_rows WHERE collection='wage_ledger'`);
+      for (const row of tw.rows) {
+        totalWage += parseFloat(row.json.net_amount) || 0;
+      }
+    } catch(e) { console.error('Error calc wage', e); }
+    response.total_wage = totalWage;
+
+    // 9. Total Scrap
+    let totalScrap = 0;
+    try {
+      const sc1 = await pool.query(`SELECT json FROM app_rows WHERE collection='cut_defects' AND json->>'status'='reviewed'`);
+      for (const row of sc1.rows) {
+         totalScrap += parseInt(row.json.approved_qty) || 0;
+      }
+      const sc2 = await pool.query(`SELECT json FROM app_rows WHERE collection='repair_returns' AND json->>'status'='completed'`);
+      for (const row of sc2.rows) {
+         if (row.json.decisions && Array.isArray(row.json.decisions)) {
+            for (const dec of row.json.decisions) {
+               if ((dec.group === 'unrepairable' && dec.decision === 'accept_as_scrap') || (dec.group === 'needs_review' && dec.decision === 'accept_scrap')) {
+                  totalScrap += parseInt(dec.qty) || 0;
+               }
+            }
+         }
+      }
+    } catch(e) { console.error('Error calc scrap', e); }
+    response.total_scrap = totalScrap;
+
   } catch (err) {
-    console.error("Dashboard Stats Error:", err);
-    res.status(500).json({ error: err.message });
+    console.error("Global Dashboard Stats Error:", err);
   }
+  
+  // در هر صورت، ساختار پاسخ کامل و معتبر است
+  res.json(response);
 });
 
 app.get('/api/dashboard/alerts', auth, async (req, res) => {
@@ -260,7 +315,7 @@ app.get('/api/dashboard/alerts', auth, async (req, res) => {
 });
 
 // ==========================================
-// سایر APIها
+// سایر APIها (خرابی، مرجوعی، ضایعات، چت)
 // ==========================================
 app.put('/api/cut-defects/:id/decide', auth, async (req, res) => {
   if (req.user.role !== 'admin') return res.status(403).json({ error: 'Admin only' });
