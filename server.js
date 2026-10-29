@@ -135,6 +135,14 @@ app.delete('/api/store/:collection/:id', auth, async (req, res) => {
   catch (err) { res.status(500).json({ error: err.message }); }
 });
 
+// 🆕 اضافه کردن مسیر مستقیم برای لیست خرابی برش (طبق درخواست بازار استودیو)
+app.get('/api/cut-defects', auth, async (req, res) => {
+  try {
+    const r = await pool.query(`SELECT json FROM app_rows WHERE collection='cut_defects' ORDER BY (json->>'created_at') DESC`);
+    res.json(r.rows.map(x => x.json));
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
 app.get('/api/delivery-lines-for-return', auth, async (req, res) => {
   try {
     const isAdmin = req.user.role === 'admin';
@@ -174,13 +182,13 @@ app.get('/api/delivery-lines-for-return', auth, async (req, res) => {
 });
 
 // ==========================================
-// آمار داشبورد (ضد کرش با محاسبه در جاوااسکریپت)
+// آمار داشبورد (ساختار دقیقاً طبق خواسته بازار استودیو)
 // ==========================================
 app.get('/api/dashboard/stats', auth, async (req, res) => {
   let response = {
     users: 0, workshops: 0, products: 0, dispatches: 0, actual_dispatched: 0,
     deliveries: 0, actual_delivered: 0, pending_returns: 0, pending_defects: 0,
-    total_wage: 0, total_scrap: 0
+    total_wage: 0, total_scrap: 0, scrap_from_cut: 0, scrap_from_sewing: 0
   };
 
   try {
@@ -204,91 +212,75 @@ app.get('/api/dashboard/stats', auth, async (req, res) => {
 
     // 4. Dispatches (Sum of qty inside lines)
     let totalDispatched = 0;
-    try {
-      const d = await pool.query(`SELECT json FROM app_rows WHERE collection='dispatches'${filter}`);
-      for (const row of d.rows) {
-        if (row.json && Array.isArray(row.json.lines)) {
-          for (const line of row.json.lines) {
-            totalDispatched += parseInt(line.qty) || 0;
-          }
+    const d = await pool.query(`SELECT json FROM app_rows WHERE collection='dispatches'${filter}`);
+    for (const row of d.rows) {
+      if (row.json && Array.isArray(row.json.lines)) {
+        for (const line of row.json.lines) {
+          totalDispatched += parseInt(line.qty) || 0;
         }
       }
-    } catch(e) { console.error('Error calc dispatches', e); }
+    }
     response.dispatches = totalDispatched;
 
-    // 5. Defects
+    // 5. Defects (Cut)
     let totalDefects = 0;
     let pendingDefectsCount = 0;
-    try {
-      const df = await pool.query(`SELECT json FROM app_rows WHERE collection='cut_defects' AND json->>'status' IN ('pending', 'reviewed') ${filter}`);
-      for (const row of df.rows) {
-        totalDefects += parseInt(row.json.declared_qty) || 0;
-        if (row.json.status === 'pending' || !row.json.status) pendingDefectsCount++;
-      }
-    } catch(e) { console.error('Error calc defects', e); }
+    let scrapFromCut = 0;
+    const df = await pool.query(`SELECT json FROM app_rows WHERE collection='cut_defects' AND json->>'status' IN ('pending', 'reviewed') ${filter}`);
+    for (const row of df.rows) {
+      totalDefects += parseInt(row.json.declared_qty) || 0;
+      if (row.json.status === 'pending' || !row.json.status) pendingDefectsCount++;
+      if (row.json.status === 'reviewed') scrapFromCut += parseInt(row.json.approved_qty) || 0;
+    }
     response.actual_dispatched = Math.max(0, response.dispatches - totalDefects);
     response.pending_defects = pendingDefectsCount;
+    response.scrap_from_cut = scrapFromCut;
 
     // 6. Deliveries (Sum of qty_delivered)
     let totalDelivered = 0;
-    try {
-      const dl = await pool.query(`SELECT json FROM app_rows WHERE collection='sewing_delivery_lines'`);
-      for (const row of dl.rows) {
-        totalDelivered += parseInt(row.json.qty_delivered) || 0;
-      }
-    } catch(e) { console.error('Error calc deliveries', e); }
+    const dl = await pool.query(`SELECT json FROM app_rows WHERE collection='sewing_delivery_lines'`);
+    for (const row of dl.rows) {
+      totalDelivered += parseInt(row.json.qty_delivered) || 0;
+    }
     response.deliveries = totalDelivered;
 
-    // 7. Returns
+    // 7. Returns & Scrap from Sewing
     let totalReturns = 0;
     let pendingReturnsCount = 0;
-    try {
-      const r = await pool.query(`SELECT json FROM app_rows WHERE collection='repair_returns' AND json->>'status' IN ('pending_workshop_report', 'pending_admin_decision', 'completed') ${filter}`);
-      for (const row of r.rows) {
-        totalReturns += parseInt(row.json.qty_original) || 0;
-        if (row.json.status === 'pending_workshop_report' || row.json.status === 'pending_admin_decision') {
-          pendingReturnsCount++;
+    let scrapFromSewing = 0;
+    const r = await pool.query(`SELECT json FROM app_rows WHERE collection='repair_returns' AND json->>'status' IN ('pending_workshop_report', 'pending_admin_decision', 'completed') ${filter}`);
+    for (const row of r.rows) {
+      totalReturns += parseInt(row.json.qty_original) || 0;
+      if (row.json.status === 'pending_workshop_report' || row.json.status === 'pending_admin_decision') {
+        pendingReturnsCount++;
+      }
+      if (row.json.status === 'completed' && row.json.decisions && Array.isArray(row.json.decisions)) {
+        for (const dec of row.json.decisions) {
+          if ((dec.group === 'unrepairable' && dec.decision === 'accept_as_scrap') || (dec.group === 'needs_review' && dec.decision === 'accept_scrap')) {
+            scrapFromSewing += parseInt(dec.qty) || 0;
+          }
         }
       }
-    } catch(e) { console.error('Error calc returns', e); }
+    }
     response.actual_delivered = Math.max(0, response.deliveries - totalReturns);
     response.pending_returns = pendingReturnsCount;
+    response.scrap_from_sewing = scrapFromSewing;
 
     // 8. Total Wage
     let totalWage = 0;
-    try {
-      const tw = await pool.query(`SELECT json FROM app_rows WHERE collection='wage_ledger'`);
-      for (const row of tw.rows) {
-        totalWage += parseFloat(row.json.net_amount) || 0;
-      }
-    } catch(e) { console.error('Error calc wage', e); }
+    const tw = await pool.query(`SELECT json FROM app_rows WHERE collection='wage_ledger'`);
+    for (const row of tw.rows) {
+      totalWage += parseFloat(row.json.net_amount) || 0;
+    }
     response.total_wage = totalWage;
 
     // 9. Total Scrap
-    let totalScrap = 0;
-    try {
-      const sc1 = await pool.query(`SELECT json FROM app_rows WHERE collection='cut_defects' AND json->>'status'='reviewed'`);
-      for (const row of sc1.rows) {
-         totalScrap += parseInt(row.json.approved_qty) || 0;
-      }
-      const sc2 = await pool.query(`SELECT json FROM app_rows WHERE collection='repair_returns' AND json->>'status'='completed'`);
-      for (const row of sc2.rows) {
-         if (row.json.decisions && Array.isArray(row.json.decisions)) {
-            for (const dec of row.json.decisions) {
-               if ((dec.group === 'unrepairable' && dec.decision === 'accept_as_scrap') || (dec.group === 'needs_review' && dec.decision === 'accept_scrap')) {
-                  totalScrap += parseInt(dec.qty) || 0;
-               }
-            }
-         }
-      }
-    } catch(e) { console.error('Error calc scrap', e); }
-    response.total_scrap = totalScrap;
+    response.total_scrap = scrapFromCut + scrapFromSewing;
 
   } catch (err) {
-    console.error("Global Dashboard Stats Error:", err);
+    console.error("Dashboard Stats Error:", err);
   }
   
-  // در هر صورت، ساختار پاسخ کامل و معتبر است
   res.json(response);
 });
 
