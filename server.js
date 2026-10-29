@@ -115,26 +115,15 @@ app.post('/api/store/:collection', auth, async (req, res) => {
   try {
     const collection = req.params.collection;
     const data = req.body;
-    
-    // 🛡️ ۴. اعتبارسنجی هوشمند سند خالی
     const validCollections = ['dispatches', 'workshop_receipts', 'sewing_deliveries', 'repair_returns', 'cut_defects'];
     if (validCollections.includes(collection)) {
       const jsonStr = JSON.stringify(data);
-      // اگر کل دیتا خالی بود
-      if (!data || jsonStr === '{}' || jsonStr === 'null') {
-        return res.status(400).json({ error: 'سند خالی قابل ثبت نیست.' });
-      }
-      
-      // بررسی اینکه آیا حداقل یک آرایه دارای داده وجود دارد یا فیلد معتبری مثل شماره سند پر شده است
+      if (!data || jsonStr === '{}' || jsonStr === 'null') return res.status(400).json({ error: 'سند خالی قابل ثبت نیست.' });
       const hasArrayData = Object.values(data).some(val => Array.isArray(val) && val.length > 0);
       const hasQtyData = data.qty || data.total_qty || data.qty_original || data.declared_qty || data.qty_received;
       const hasHeaderData = data.serial || data.workshop_id || data.dispatch_date || data.date;
-      
-      if (!hasArrayData && !hasQtyData && !hasHeaderData) {
-        return res.status(400).json({ error: 'سند خالی قابل ثبت نیست. اطلاعات وارد شده نامعتبر است.' });
-      }
+      if (!hasArrayData && !hasQtyData && !hasHeaderData) return res.status(400).json({ error: 'سند خالی قابل ثبت نیست. اطلاعات وارد شده نامعتبر است.' });
     }
-
     const id = data.id || Date.now().toString();
     await pool.query('INSERT INTO app_rows (id, collection, json) VALUES ($1,$2,$3) ON CONFLICT (id) DO UPDATE SET json=EXCLUDED.json', [id, collection, data]);
     res.json({ message: 'Saved', id });
@@ -181,23 +170,14 @@ app.get('/api/delivery-lines-for-return', auth, async (req, res) => {
       const maxReturnable = currentAccepted - alreadyReturned;
       if (maxReturnable <= 0) continue;
 
-      result.push({
-        line_id: line.id,
-        delivery_id: delivery.id,
-        serial: delivery.serial || delivery.id,
-        product_name: product.name || 'نامشخص',
-        product_code: product.code || '',
-        size_name: size.name || 'نامشخص',
-        max_returnable: maxReturnable,
-        workshop_id: delivery.workshop_id || delivery.workshopId
-      });
+      result.push({ line_id: line.id, delivery_id: delivery.id, serial: delivery.serial || delivery.id, product_name: product.name || 'نامشخص', product_code: product.code || '', size_name: size.name || 'نامشخص', max_returnable: maxReturnable, workshop_id: delivery.workshop_id || delivery.workshopId });
     }
     res.json(result);
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
 // ==========================================
-// آمار داشبورد و هشدارها
+// آمار داشبورد و هشدارها (اصلاح‌شده با COALESCE)
 // ==========================================
 app.get('/api/dashboard/stats', auth, async (req, res) => {
   try {
@@ -205,9 +185,10 @@ app.get('/api/dashboard/stats', auth, async (req, res) => {
     const wid = req.user.workshop_id;
     const filter = !isAdmin && wid ? ` AND (json->>'workshop_id' = '${wid}' OR json->>'workshopId' = '${wid}')` : '';
 
-    const dispatchQtyRes = await pool.query(`SELECT COALESCE(SUM((json->>'qty')::int), 0) as total FROM app_rows, jsonb_array_elements(json->'lines') l WHERE collection='dispatches' AND (json->>'status' != 'draft') ${filter}`);
+    // 🛠️ اصلاح کرش: استفاده از COALESCE برای آرایه lines
+    const dispatchQtyRes = await pool.query(`SELECT COALESCE(SUM((l->>'qty')::int), 0) as total FROM app_rows, jsonb_array_elements(COALESCE(json->'lines', '[]'::jsonb)) l WHERE collection='dispatches' AND (json->>'status' != 'draft') ${filter}`);
     const cutDefectsRes = await pool.query(`SELECT COALESCE(SUM((json->>'declared_qty')::int), 0) as total FROM app_rows WHERE collection='cut_defects' AND json->>'status' IN ('pending', 'reviewed') ${filter}`);
-    const deliveryRes = await pool.query(`SELECT COALESCE(SUM((json->>'qty_delivered')::int), 0) as total FROM app_rows, jsonb_array_elements(json->'lines') l WHERE collection='sewing_deliveries' AND (json->>'status' != 'draft') ${filter}`);
+    const deliveryRes = await pool.query(`SELECT COALESCE(SUM((l->>'qty_delivered')::int), 0) as total FROM app_rows, jsonb_array_elements(COALESCE(json->'lines', '[]'::jsonb)) l WHERE collection='sewing_deliveries' AND (json->>'status' != 'draft') ${filter}`);
     const returnRes = await pool.query(`SELECT COALESCE(SUM((json->>'qty_original')::int), 0) as total FROM app_rows WHERE collection='repair_returns' AND json->>'status' IN ('pending_workshop_report', 'pending_admin_decision', 'completed') ${filter}`);
 
     const [users, workshops, products, pendingReturns, pendingDefects, totalWage, scrapTotal] = await Promise.all([
@@ -227,10 +208,8 @@ app.get('/api/dashboard/stats', auth, async (req, res) => {
 
     res.json({
       users: parseInt(users.rows[0].count), workshops: parseInt(workshops.rows[0].count), products: parseInt(products.rows[0].count),
-      dispatches: rawDispatch,
-      actual_dispatched: Math.max(0, rawDispatch - liveDefects),
-      deliveries: rawDelivery, 
-      actual_delivered: Math.max(0, rawDelivery - liveReturns),
+      dispatches: rawDispatch, actual_dispatched: Math.max(0, rawDispatch - liveDefects),
+      deliveries: rawDelivery, actual_delivered: Math.max(0, rawDelivery - liveReturns),
       pending_returns: parseInt(pendingReturns.rows[0].count), pending_defects: parseInt(pendingDefects.rows[0].count),
       total_wage: parseFloat(totalWage.rows[0].total), total_scrap: parseInt(scrapTotal.rows[0].total)
     });
@@ -247,10 +226,8 @@ app.get('/api/dashboard/alerts', auth, async (req, res) => {
     if (isAdmin) {
       const pd = await pool.query(`SELECT COUNT(*) FROM app_rows WHERE collection='cut_defects' AND (json->>'status' IS NULL OR json->>'status'='pending')`);
       if (parseInt(pd.rows[0].count) > 0) alerts.push({ type: 'defect', title: 'خرابی برش در انتظار تایید', count: parseInt(pd.rows[0].count), link: '/cut-defects', color: 'orange' });
-
       const pr = await pool.query(`SELECT COUNT(*) FROM app_rows WHERE collection='repair_returns' AND json->>'status'='pending_admin_decision'`);
       if (parseInt(pr.rows[0].count) > 0) alerts.push({ type: 'return', title: 'مرجوعی در انتظار تصمیم', count: parseInt(pr.rows[0].count), link: '/returns', color: 'red' });
-      
       const pdv = await pool.query(`SELECT COUNT(*) FROM app_rows WHERE collection='sewing_deliveries' AND json->>'status'='pending_approval'`);
       if (parseInt(pdv.rows[0].count) > 0) alerts.push({ type: 'delivery', title: 'تحویل دوخت در انتظار تایید', count: parseInt(pdv.rows[0].count), link: '/deliveries', color: 'green' });
     } else {
@@ -262,7 +239,7 @@ app.get('/api/dashboard/alerts', auth, async (req, res) => {
 });
 
 // ==========================================
-// سایر APIها (خرابی، مرجوعی، ضایعات، چت)
+// سایر APIها
 // ==========================================
 app.put('/api/cut-defects/:id/decide', auth, async (req, res) => {
   if (req.user.role !== 'admin') return res.status(403).json({ error: 'Admin only' });
@@ -336,7 +313,6 @@ app.put('/api/repair-returns/:id/decide', auth, async (req, res) => {
     if (!data.decisions) data.decisions = [];
     data.decisions = data.decisions.filter(d => d.group !== group);
     data.decisions.push({ group, decision, qty, note: note || '', decided_at: new Date().toISOString() });
-    
     const dl = await pool.query(`SELECT id, json FROM app_rows WHERE id=$1 AND collection='sewing_delivery_lines'`, [data.delivery_line_id]);
     if (dl.rows.length) {
       const line = dl.rows[0].json;
