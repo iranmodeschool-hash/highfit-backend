@@ -177,7 +177,7 @@ app.get('/api/delivery-lines-for-return', auth, async (req, res) => {
 });
 
 // ==========================================
-// آمار داشبورد و هشدارها (اصلاح‌شده با COALESCE)
+// آمار داشبورد و هشدارها (اصلاح نهایی و ضد کرش)
 // ==========================================
 app.get('/api/dashboard/stats', auth, async (req, res) => {
   try {
@@ -185,11 +185,11 @@ app.get('/api/dashboard/stats', auth, async (req, res) => {
     const wid = req.user.workshop_id;
     const filter = !isAdmin && wid ? ` AND (json->>'workshop_id' = '${wid}' OR json->>'workshopId' = '${wid}')` : '';
 
-    // 🛠️ اصلاح کرش: استفاده از COALESCE برای آرایه lines
-    const dispatchQtyRes = await pool.query(`SELECT COALESCE(SUM((l->>'qty')::int), 0) as total FROM app_rows, jsonb_array_elements(COALESCE(json->'lines', '[]'::jsonb)) l WHERE collection='dispatches' AND (json->>'status' != 'draft') ${filter}`);
-    const cutDefectsRes = await pool.query(`SELECT COALESCE(SUM((json->>'declared_qty')::int), 0) as total FROM app_rows WHERE collection='cut_defects' AND json->>'status' IN ('pending', 'reviewed') ${filter}`);
-    const deliveryRes = await pool.query(`SELECT COALESCE(SUM((l->>'qty_delivered')::int), 0) as total FROM app_rows, jsonb_array_elements(COALESCE(json->'lines', '[]'::jsonb)) l WHERE collection='sewing_deliveries' AND (json->>'status' != 'draft') ${filter}`);
-    const returnRes = await pool.query(`SELECT COALESCE(SUM((json->>'qty_original')::int), 0) as total FROM app_rows WHERE collection='repair_returns' AND json->>'status' IN ('pending_workshop_report', 'pending_admin_decision', 'completed') ${filter}`);
+    // استفاده از Regex برای جلوگیری از خطای تبدیل رشته خالی به عدد
+    const dispatchQtyRes = await pool.query(`SELECT COALESCE(SUM(CASE WHEN l->>'qty' ~ '^[0-9]+$' THEN (l->>'qty')::int ELSE 0 END), 0) as total FROM app_rows, jsonb_array_elements(COALESCE(json->'lines', '[]'::jsonb)) l WHERE collection='dispatches' AND (json->>'status' != 'draft') ${filter}`);
+    const cutDefectsRes = await pool.query(`SELECT COALESCE(SUM(CASE WHEN json->>'declared_qty' ~ '^[0-9]+$' THEN (json->>'declared_qty')::int ELSE 0 END), 0) as total FROM app_rows WHERE collection='cut_defects' AND json->>'status' IN ('pending', 'reviewed') ${filter}`);
+    const deliveryRes = await pool.query(`SELECT COALESCE(SUM(CASE WHEN l->>'qty_delivered' ~ '^[0-9]+$' THEN (l->>'qty_delivered')::int ELSE 0 END), 0) as total FROM app_rows, jsonb_array_elements(COALESCE(json->'lines', '[]'::jsonb)) l WHERE collection='sewing_deliveries' AND (json->>'status' != 'draft') ${filter}`);
+    const returnRes = await pool.query(`SELECT COALESCE(SUM(CASE WHEN json->>'qty_original' ~ '^[0-9]+$' THEN (json->>'qty_original')::int ELSE 0 END), 0) as total FROM app_rows WHERE collection='repair_returns' AND json->>'status' IN ('pending_workshop_report', 'pending_admin_decision', 'completed') ${filter}`);
 
     const [users, workshops, products, pendingReturns, pendingDefects, totalWage, scrapTotal] = await Promise.all([
       isAdmin ? pool.query('SELECT COUNT(*) FROM users') : { rows: [{ count: 0 }] },
@@ -197,8 +197,8 @@ app.get('/api/dashboard/stats', auth, async (req, res) => {
       pool.query(`SELECT COUNT(*) FROM app_rows WHERE collection='products'${filter}`),
       pool.query(`SELECT COUNT(*) FROM app_rows WHERE collection='repair_returns' AND json->>'status' IN ('pending_workshop_report','pending_admin_decision')${filter}`),
       pool.query(`SELECT COUNT(*) FROM app_rows WHERE collection='cut_defects' AND (json->>'status' IS NULL OR json->>'status'='pending')${filter}`),
-      pool.query(`SELECT COALESCE(SUM((json->>'net_amount')::numeric), 0) as total FROM app_rows WHERE collection='wage_ledger'${filter}`),
-      pool.query(`SELECT (SELECT COALESCE(SUM((json->>'approved_qty')::int), 0) FROM app_rows WHERE collection='cut_defects' AND json->>'status'='reviewed') + (SELECT COALESCE(SUM((d->>'qty')::int), 0) FROM app_rows, jsonb_array_elements(COALESCE(json->'decisions', '[]'::jsonb)) d WHERE collection='repair_returns' AND json->>'status'='completed' AND ((d->>'group'='unrepairable' AND d->>'decision'='accept_as_scrap') OR (d->>'group'='needs_review' AND d->>'decision'='accept_scrap'))) as total`)
+      pool.query(`SELECT COALESCE(SUM(CASE WHEN json->>'net_amount' ~ '^[0-9]+$' THEN (json->>'net_amount')::numeric ELSE 0 END), 0) as total FROM app_rows WHERE collection='wage_ledger'${filter}`),
+      pool.query(`SELECT (SELECT COALESCE(SUM(CASE WHEN json->>'approved_qty' ~ '^[0-9]+$' THEN (json->>'approved_qty')::int ELSE 0 END), 0) FROM app_rows WHERE collection='cut_defects' AND json->>'status'='reviewed') + (SELECT COALESCE(SUM(CASE WHEN d->>'qty' ~ '^[0-9]+$' THEN (d->>'qty')::int ELSE 0 END), 0) FROM app_rows, jsonb_array_elements(COALESCE(json->'decisions', '[]'::jsonb)) d WHERE collection='repair_returns' AND json->>'status'='completed' AND ((d->>'group'='unrepairable' AND d->>'decision'='accept_as_scrap') OR (d->>'group'='needs_review' AND d->>'decision'='accept_scrap'))) as total`)
     ]);
 
     const rawDispatch = parseInt(dispatchQtyRes.rows[0].total) || 0;
