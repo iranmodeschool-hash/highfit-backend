@@ -5,7 +5,6 @@ const jwt = require('jsonwebtoken');
 const cors = require('cors');
 require('dotenv').config();
 
-// مدیریت خطاهای پیش‌بینی نشده (برای جلوگیری از کرش سرور)
 process.on('unhandledRejection', (reason, promise) => {
   console.error('Unhandled Rejection at:', promise, 'reason:', reason);
 });
@@ -24,7 +23,7 @@ const pool = new Pool({
   password: process.env.DB_PASSWORD,
   database: process.env.DB_NAME || 'highfit-core-db',
   ssl: process.env.DB_HOST ? false : { rejectUnauthorized: false },
-  max: 5, // محدود کردن تعداد اتصال‌ها برای جلوگیری از کمبود منابع
+  max: 5,
   idleTimeoutMillis: 30000,
   connectionTimeoutMillis: 2000,
 });
@@ -43,10 +42,7 @@ const createTables = async () => {
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       );
     `);
-
-    // ⬇️ این خط حیاتی است: ستون را به جدولِ از قبل موجود اضافه می‌کند تا خطای 502 برطرف شود
     await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS allowed_apps JSONB DEFAULT '["doakhtyar"]'::jsonb;`);
-
     await pool.query(`
       CREATE TABLE IF NOT EXISTS app_rows (
         id VARCHAR(100) PRIMARY KEY,
@@ -73,19 +69,7 @@ const authenticateToken = (req, res, next) => {
 
 app.get('/', (req, res) => res.send('HighFit Backend is running perfectly!'));
 
-app.get('/api/force-create-admin', async (req, res) => {
-  const { email, password } = req.query;
-  try {
-    const hashedPassword = await bcrypt.hash(password, 10);
-    const check = await pool.query('SELECT * FROM users WHERE email = $1', [email]);
-    if (check.rows.length > 0) {
-      await pool.query("UPDATE users SET role = 'admin', password_hash = $1 WHERE email = $2", [hashedPassword, email]);
-      return res.send(`Admin password reset.`);
-    }
-    await pool.query('INSERT INTO users (username, email, password_hash, role, allowed_apps) VALUES ($1, $2, $3, $4, $5)', ['HAMID', email, hashedPassword, 'admin', '["doakhtyar", "petty_cash"]']);
-    res.send(`Success! New admin created.`);
-  } catch (err) { res.status(500).send(err.message); }
-});
+// ... (مسیرهای لاگین، کاربران، فروشگاه و آمار بدون تغییر) ...
 
 app.post('/api/login', async (req, res) => {
   const { email, password, app_name } = req.body;
@@ -229,7 +213,7 @@ app.delete('/api/admin/clear-all-transactions', authenticateToken, async (req, r
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// --- چت آنلاین ---
+// --- چت آنلاین با قابلیت وضعیت (تیک) ---
 app.post('/api/chat/send', authenticateToken, async (req, res) => {
   const { receiver_id, text } = req.body;
   const sender_id = req.user.id;
@@ -242,7 +226,7 @@ app.post('/api/chat/send', authenticateToken, async (req, res) => {
       sender_id,
       receiver_id,
       text,
-      is_read: false,
+      status: 'sent', // وضعیت‌ها: sent, delivered, seen
       created_at: new Date().toISOString()
     };
     await pool.query(
@@ -258,6 +242,17 @@ app.get('/api/chat/messages/:contactId', authenticateToken, async (req, res) => 
   const contactId = req.params.contactId;
 
   try {
+    // علامت زدن پیام‌هایی که برای من فرستاده شده‌اند به عنوان «تحویل داده شده» (اگر قبلاً فقط sent بوده‌اند)
+    await pool.query(
+      `UPDATE app_rows 
+       SET json = jsonb_set(json, '{status}', '"delivered"')
+       WHERE collection = 'messages' 
+       AND json->>'sender_id' = $1 
+       AND json->>'receiver_id' = $2 
+       AND json->>'status' = 'sent'`,
+      [contactId.toString(), myId.toString()]
+    );
+
     const result = await pool.query(
       `SELECT json FROM app_rows 
        WHERE collection = 'messages' 
@@ -268,15 +263,26 @@ app.get('/api/chat/messages/:contactId', authenticateToken, async (req, res) => 
        ORDER BY (json->>'created_at') ASC`,
       [myId.toString(), contactId.toString()]
     );
-    
-    await pool.query(
-      `UPDATE app_rows SET json = jsonb_set(json, '{is_read}', 'true')
-       WHERE collection = 'messages' 
-       AND json->>'sender_id' = $1 AND json->>'receiver_id' = $2 AND (json->>'is_read')::boolean = false`,
-      [contactId.toString(), myId.toString()]
-    );
 
     res.json(result.rows.map(row => row.json));
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// مسیر جدید برای علامت زدن پیام‌ها به عنوان «دیده شده» (Seen)
+app.put('/api/chat/seen/:contactId', authenticateToken, async (req, res) => {
+  const myId = req.user.id;
+  const contactId = req.params.contactId;
+  try {
+    await pool.query(
+      `UPDATE app_rows 
+       SET json = jsonb_set(json, '{status}', '"seen"')
+       WHERE collection = 'messages' 
+       AND json->>'sender_id' = $1 
+       AND json->>'receiver_id' = $2 
+       AND json->>'status' IN ('sent', 'delivered')`,
+      [contactId.toString(), myId.toString()]
+    );
+    res.json({ message: 'Messages marked as seen' });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
@@ -284,18 +290,15 @@ app.get('/api/chat/contacts', authenticateToken, async (req, res) => {
   try {
     let query = 'SELECT id, username, role, workshop_id FROM users';
     let params = [];
-    
     if (req.user.role !== 'admin') {
       query += ' WHERE role = $1';
       params.push('admin');
     }
-
     const result = await pool.query(query, params);
     res.json(result.rows);
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// --- آمار داشبورد (تک درخواست برای جلوگیری از 502) ---
 app.get('/api/dashboard/stats', authenticateToken, async (req, res) => {
   try {
     const [users, workshops, products, dispatches, deliveries, defects] = await Promise.all([
@@ -306,7 +309,6 @@ app.get('/api/dashboard/stats', authenticateToken, async (req, res) => {
       pool.query(`SELECT COUNT(*) FROM app_rows WHERE collection = 'sewing_deliveries'`),
       pool.query(`SELECT COUNT(*) FROM app_rows WHERE collection = 'cut_defects'`)
     ]);
-
     res.json({
       users: parseInt(users.rows[0].count),
       workshops: parseInt(workshops.rows[0].count),
