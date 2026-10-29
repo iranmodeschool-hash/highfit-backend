@@ -103,7 +103,6 @@ app.delete('/api/admin/users/:id', auth, async (req, res) => {
   res.json({ message: 'Deleted' });
 });
 
-// 🎯 اصلاح کلیدی: تزریق id از ستون دیتابیس به JSON
 app.get('/api/store/:collection', auth, async (req, res) => {
   try {
     const r = await pool.query('SELECT id, json FROM app_rows WHERE collection=$1', [req.params.collection]);
@@ -127,7 +126,6 @@ app.delete('/api/store/:collection/:id', auth, async (req, res) => {
   catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// 🎯 اصلاح کلیدی: تزریق id در لیست خرابی‌ها
 app.get('/api/cut-defects', auth, async (req, res) => {
   try {
     const r = await pool.query(`SELECT id, json FROM app_rows WHERE collection='cut_defects' ORDER BY (json->>'created_at') DESC`);
@@ -173,7 +171,9 @@ app.get('/api/delivery-lines-for-return', auth, async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// 🎯 آمار داشبورد (مسطح - نه درون stats)
+// ==========================================
+// 🎯 آمار داشبورد (محاسبه از جدول‌های درست)
+// ==========================================
 app.get('/api/dashboard/stats', auth, async (req, res) => {
   let response = {
     users: 0, workshops: 0, products: 0, dispatches: 0, actual_dispatched: 0,
@@ -197,15 +197,15 @@ app.get('/api/dashboard/stats', auth, async (req, res) => {
     const p = await pool.query(`SELECT COUNT(*) FROM app_rows WHERE collection='products'${filter}`);
     response.products = parseInt(p.rows[0].count) || 0;
 
+    // 4. Dispatches (خواندن مستقیم از dispatch_size_qty)
     let totalDispatched = 0;
-    const d = await pool.query(`SELECT json FROM app_rows WHERE collection='dispatches'${filter}`);
-    for (const row of d.rows) {
-      if (row.json && Array.isArray(row.json.lines)) {
-        for (const line of row.json.lines) totalDispatched += parseInt(line.qty) || 0;
-      }
+    const dq = await pool.query(`SELECT json FROM app_rows WHERE collection='dispatch_size_qty'`);
+    for (const row of dq.rows) {
+      totalDispatched += parseInt(row.json.qty) || 0;
     }
     response.dispatches = totalDispatched;
 
+    // 5. Defects (Cut)
     let totalDefects = 0, pendingDefectsCount = 0, scrapFromCut = 0;
     const df = await pool.query(`SELECT json FROM app_rows WHERE collection='cut_defects' AND json->>'status' IN ('pending', 'reviewed') ${filter}`);
     for (const row of df.rows) {
@@ -217,11 +217,15 @@ app.get('/api/dashboard/stats', auth, async (req, res) => {
     response.pending_defects = pendingDefectsCount;
     response.scrap_from_cut = scrapFromCut;
 
+    // 6. Deliveries (خواندن مستقیم از sewing_delivery_lines)
     let totalDelivered = 0;
     const dl = await pool.query(`SELECT json FROM app_rows WHERE collection='sewing_delivery_lines'`);
-    for (const row of dl.rows) totalDelivered += parseInt(row.json.qty_delivered) || 0;
+    for (const row of dl.rows) {
+      totalDelivered += parseInt(row.json.qty_delivered) || 0;
+    }
     response.deliveries = totalDelivered;
 
+    // 7. Returns & Scrap from Sewing
     let totalReturns = 0, pendingReturnsCount = 0, scrapFromSewing = 0;
     const r = await pool.query(`SELECT json FROM app_rows WHERE collection='repair_returns' AND json->>'status' IN ('pending_workshop_report', 'pending_admin_decision', 'completed') ${filter}`);
     for (const row of r.rows) {
@@ -237,11 +241,15 @@ app.get('/api/dashboard/stats', auth, async (req, res) => {
     response.pending_returns = pendingReturnsCount;
     response.scrap_from_sewing = scrapFromSewing;
 
+    // 8. Total Wage
     let totalWage = 0;
     const tw = await pool.query(`SELECT json FROM app_rows WHERE collection='wage_ledger'`);
-    for (const row of tw.rows) totalWage += parseFloat(row.json.net_amount) || 0;
+    for (const row of tw.rows) {
+      totalWage += parseFloat(row.json.net_amount) || 0;
+    }
     response.total_wage = totalWage;
 
+    // 9. Total Scrap
     response.total_scrap = scrapFromCut + scrapFromSewing;
 
   } catch (err) {
