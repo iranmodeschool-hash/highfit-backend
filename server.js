@@ -39,7 +39,7 @@ const auth = (req, res, next) => {
   catch (err) { res.status(401).json({ error: 'Invalid token' }); }
 };
 
-// 🛡️ تابع کمکی برای اطمینان از اینکه JSON حتماً یک آبجکت معتبر است و id دارد
+// 🛡️ تابع کمکی: تضمین می‌کند خروجی همیشه آبجکت بوده و همیشه یک id داشته باشد
 const safeParse = (data, dbId) => {
   let obj = data;
   if (typeof obj === 'string') {
@@ -51,6 +51,7 @@ const safeParse = (data, dbId) => {
 
 app.get('/', (req, res) => res.send('HighFit Backend is running perfectly!'));
 
+// ===== احراز هویت =====
 app.get('/api/force-create-admin', async (req, res) => {
   const { email, password } = req.query;
   try {
@@ -75,6 +76,7 @@ app.post('/api/login', async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
+// ===== مدیریت کاربران =====
 app.get('/api/admin/users', auth, async (req, res) => {
   if (req.user.role !== 'admin') return res.status(403).json({ error: 'Admin only' });
   const r = await pool.query('SELECT id, username, email, role, workshop_id, allowed_apps, created_at FROM users ORDER BY id DESC');
@@ -113,12 +115,11 @@ app.delete('/api/admin/users/:id', auth, async (req, res) => {
   res.json({ message: 'Deleted' });
 });
 
-// 🎯 Store عمومی (تزریق id و امن‌سازی)
+// ===== Store عمومی (با تضمین id) =====
 app.get('/api/store/:collection', auth, async (req, res) => {
   try {
     const r = await pool.query('SELECT id, json FROM app_rows WHERE collection=$1', [req.params.collection]);
-    const safeRows = r.rows.map(x => safeParse(x.json, x.id));
-    res.json(safeRows);
+    res.json(r.rows.map(x => safeParse(x.json, x.id)));
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
@@ -138,58 +139,64 @@ app.delete('/api/store/:collection/:id', auth, async (req, res) => {
   catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// 🎯 لیست خرابی برش (اصلاح‌شده و تضمین id)
+// ==========================================
+// 🎯 لیست خرابی برش (کاملاً امن)
+// ==========================================
 app.get('/api/cut-defects', auth, async (req, res) => {
   try {
     const r = await pool.query(`SELECT id, json FROM app_rows WHERE collection='cut_defects' ORDER BY (json->>'created_at') DESC`);
-    const safeRows = r.rows.map(row => safeParse(row.json, row.id));
-    res.json(safeRows);
+    res.json(r.rows.map(row => safeParse(row.json, row.id)));
   } catch (err) { 
     console.error("Cut Defects Error:", err);
     res.status(500).json({ error: 'خطا در خواندن لیست خرابی‌ها' }); 
   }
 });
 
-app.get('/api/delivery-lines-for-return', auth, async (req, res) => {
+// ==========================================
+// 🎯 تصمیم‌گیری مدیر روی خرابی برش
+// ==========================================
+app.put('/api/cut-defects/:id/decide', auth, async (req, res) => {
+  if (req.user.role !== 'admin') return res.status(403).json({ error: 'Admin only' });
+  const { id } = req.params; 
+  const { approved_qty, rejected_qty, corrected_qty, note } = req.body;
+  
   try {
-    const isAdmin = req.user.role === 'admin';
-    const wid = req.user.workshop_id;
-    const deliveries = await pool.query(`SELECT json FROM app_rows WHERE collection='sewing_deliveries'`);
-    const deliveryLines = await pool.query(`SELECT id, json FROM app_rows WHERE collection='sewing_delivery_lines'`);
-    const dispatchLines = await pool.query(`SELECT id, json FROM app_rows WHERE collection='dispatch_lines'`);
-    const products = await pool.query(`SELECT id, json FROM app_rows WHERE collection='products'`);
-    const sizes = await pool.query(`SELECT id, json FROM app_rows WHERE collection='sizes'`);
-
-    const deliveriesMap = {}; deliveries.rows.forEach(r => { const p = safeParse(r.json, r.id); deliveriesMap[p.id] = p; });
-    const dispatchLinesMap = {}; dispatchLines.rows.forEach(r => { const p = safeParse(r.json, r.id); dispatchLinesMap[p.id] = p; });
-    const productsMap = {}; products.rows.forEach(r => { const p = safeParse(r.json, r.id); productsMap[p.id] = p; });
-    const sizesMap = {}; sizes.rows.forEach(r => { const p = safeParse(r.json, r.id); sizesMap[p.id] = p; });
-
-    const result = [];
-    for (const row of deliveryLines.rows) {
-      const line = safeParse(row.json, row.id);
-      const delivery = deliveriesMap[line.delivery_id || line.deliveryId];
-      if (!delivery) continue;
-      if (!isAdmin && wid && String(delivery.workshop_id || delivery.workshopId) !== String(wid)) continue;
-      if (parseInt(line.qty_accepted || 0) <= 0) continue;
-
-      const dLine = dispatchLinesMap[line.dispatch_line_id || line.dispatchLineId] || {};
-      const product = productsMap[dLine.product_id || dLine.productId] || {};
-      const size = sizesMap[line.size_id || line.sizeId] || { name: line.size_id || 'نامشخص' };
-      
-      const currentAccepted = parseInt(line.qty_accepted || 0);
-      const alreadyReturned = parseInt(line.qty_returned_pending || 0);
-      const maxReturnable = currentAccepted - alreadyReturned;
-      if (maxReturnable <= 0) continue;
-
-      result.push({ line_id: line.id, delivery_id: delivery.id, serial: delivery.serial || delivery.id, product_name: product.name || 'نامشخص', product_code: product.code || '', size_name: size.name || 'نامشخص', max_returnable: maxReturnable, workshop_id: delivery.workshop_id || delivery.workshopId });
+    const row = await pool.query(`SELECT json FROM app_rows WHERE id=$1 AND collection='cut_defects'`, [id]);
+    if (!row.rows.length) return res.status(404).json({ error: 'Not found' });
+    
+    const data = safeParse(row.rows[0].json, id);
+    const declared = parseInt(data.declared_qty || 0);
+    const approved = parseInt(approved_qty || 0);
+    const rejected = parseInt(rejected_qty || 0);
+    const corrected = parseInt(corrected_qty || 0);
+    
+    // اعتبارسنجی: جمع سه تصمیم باید برابر تعداد اعلامی باشد
+    if (approved + rejected + corrected !== declared) {
+      return res.status(400).json({ error: `جمع تایید (${approved}) + رد (${rejected}) + اصلاح (${corrected}) باید برابر تعداد اعلامی (${declared}) باشد.` });
     }
-    res.json(result);
+
+    // آپدیت وضعیت رکورد خرابی
+    const updated = { ...data, approved_qty: approved, rejected_qty: rejected, corrected_qty: corrected, status: 'reviewed', review_note: note || '', reviewed_at: new Date().toISOString() };
+    await pool.query('UPDATE app_rows SET json=$1 WHERE id=$2', [JSON.stringify(updated), id]);
+
+    // اثر روی ردیف حواله (فقط ضایعات تایید شده کم می‌شوند)
+    if (approved > 0 && data.dispatch_line_id) {
+      const dl = await pool.query(`SELECT id, json FROM app_rows WHERE id=$1 AND collection='dispatch_lines'`, [data.dispatch_line_id]);
+      if (dl.rows.length) {
+        const line = safeParse(dl.rows[0].json, dl.rows[0].id);
+        line.qty_approved_defects = (parseInt(line.qty_approved_defects || 0) + approved);
+        // اگر اصلاح شده بود، به عنوان یک فیلد گزارش ثبت می‌کنیم
+        line.qty_corrected_total = (parseInt(line.qty_corrected_total || 0) + corrected);
+        await pool.query('UPDATE app_rows SET json=$1 WHERE id=$2', [JSON.stringify(line), data.dispatch_line_id]);
+      }
+    }
+    
+    res.json({ message: 'تصمیم با موفقیت ثبت شد' });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
 // ==========================================
-// 🎯 آمار داشبورد (پاسخ مسطح و امن)
+// 🎯 آمار داشبورد (پاسخ مسطح)
 // ==========================================
 app.get('/api/dashboard/stats', auth, async (req, res) => {
   let response = { users: 0, workshops: 0, products: 0, dispatches: 0, actual_dispatched: 0, deliveries: 0, actual_delivered: 0, pending_returns: 0, pending_defects: 0, total_wage: 0, total_scrap: 0, scrap_from_cut: 0, scrap_from_sewing: 0 };
@@ -221,27 +228,12 @@ app.get('/api/dashboard/stats', auth, async (req, res) => {
     let totalDelivered = 0; const dl = await pool.query(`SELECT json FROM app_rows WHERE collection='sewing_delivery_lines'`);
     for (const row of dl.rows) { const p = safeParse(row.json, row.id); totalDelivered += parseInt(p.qty_delivered) || 0; }
     response.deliveries = totalDelivered;
-
-    let totalReturns = 0, pendingReturnsCount = 0, scrapFromSewing = 0;
-    const r = await pool.query(`SELECT json FROM app_rows WHERE collection='repair_returns' AND json->>'status' IN ('pending_workshop_report', 'pending_admin_decision', 'completed') ${filter}`);
-    for (const row of r.rows) {
-      const p = safeParse(row.json, row.id);
-      totalReturns += parseInt(p.qty_original) || 0;
-      if (p.status === 'pending_workshop_report' || p.status === 'pending_admin_decision') pendingReturnsCount++;
-      if (p.status === 'completed' && Array.isArray(p.decisions)) {
-        for (const dec of p.decisions) {
-          if ((dec.group === 'unrepairable' && dec.decision === 'accept_as_scrap') || (dec.group === 'needs_review' && dec.decision === 'accept_scrap')) scrapFromSewing += parseInt(dec.qty) || 0;
-        }
-      }
-    }
-    response.actual_delivered = Math.max(0, response.deliveries - totalReturns);
-    response.pending_returns = pendingReturnsCount;
-    response.scrap_from_sewing = scrapFromSewing;
+    response.actual_delivered = totalDelivered; // فعلا بدون کسر مرجوعی
 
     let totalWage = 0; const tw = await pool.query(`SELECT json FROM app_rows WHERE collection='wage_ledger'`);
     for (const row of tw.rows) { const p = safeParse(row.json, row.id); totalWage += parseFloat(p.net_amount) || 0; }
     response.total_wage = totalWage;
-    response.total_scrap = scrapFromCut + scrapFromSewing;
+    response.total_scrap = scrapFromCut;
   } catch (err) { console.error("Dashboard Stats Error:", err); }
   res.json(response);
 });
@@ -255,136 +247,14 @@ app.get('/api/dashboard/alerts', auth, async (req, res) => {
     if (isAdmin) {
       const pd = await pool.query(`SELECT COUNT(*) FROM app_rows WHERE collection='cut_defects' AND (json->>'status' IS NULL OR json->>'status'='pending')`);
       if (parseInt(pd.rows[0].count) > 0) alerts.push({ type: 'defect', title: 'خرابی برش در انتظار تایید', count: parseInt(pd.rows[0].count), link: '/cut-defects', color: 'orange' });
-      const pr = await pool.query(`SELECT COUNT(*) FROM app_rows WHERE collection='repair_returns' AND json->>'status'='pending_admin_decision'`);
-      if (parseInt(pr.rows[0].count) > 0) alerts.push({ type: 'return', title: 'مرجوعی در انتظار تصمیم', count: parseInt(pr.rows[0].count), link: '/returns', color: 'red' });
       const pdv = await pool.query(`SELECT COUNT(*) FROM app_rows WHERE collection='sewing_deliveries' AND json->>'status'='pending_approval'`);
       if (parseInt(pdv.rows[0].count) > 0) alerts.push({ type: 'delivery', title: 'تحویل دوخت در انتظار تایید', count: parseInt(pdv.rows[0].count), link: '/deliveries', color: 'green' });
-    } else {
-      const pr = await pool.query(`SELECT COUNT(*) FROM app_rows WHERE collection='repair_returns' AND json->>'status'='pending_workshop_report' ${filter}`);
-      if (parseInt(pr.rows[0].count) > 0) alerts.push({ type: 'return_report', title: 'نیاز به ثبت گزارش مرجوعی', count: parseInt(pr.rows[0].count), link: '/returns', color: 'orange' });
     }
     res.json(alerts);
   } catch (err) { res.json([]); }
 });
 
-app.put('/api/cut-defects/:id/decide', auth, async (req, res) => {
-  if (req.user.role !== 'admin') return res.status(403).json({ error: 'Admin only' });
-  const { id } = req.params; const { approved_qty, rejected_qty, corrected_qty, note } = req.body;
-  try {
-    const row = await pool.query(`SELECT json FROM app_rows WHERE id=$1 AND collection='cut_defects'`, [id]);
-    if (!row.rows.length) return res.status(404).json({ error: 'Not found' });
-    const data = safeParse(row.rows[0].json, id);
-    if (parseInt(approved_qty||0) + parseInt(rejected_qty||0) + parseInt(corrected_qty||0) !== parseInt(data.declared_qty||0)) return res.status(400).json({ error: 'جمع برابر تعداد اعلامی نیست.' });
-    const updated = { ...data, approved_qty, rejected_qty, corrected_qty, status: 'reviewed', review_note: note || '', reviewed_at: new Date().toISOString() };
-    await pool.query('UPDATE app_rows SET json=$1 WHERE id=$2', [JSON.stringify(updated), id]);
-    if (parseInt(approved_qty) > 0 && data.dispatch_line_id) {
-      const dl = await pool.query(`SELECT id, json FROM app_rows WHERE id=$1 AND collection='dispatch_lines'`, [data.dispatch_line_id]);
-      if (dl.rows.length) {
-        const line = safeParse(dl.rows[0].json, dl.rows[0].id);
-        line.qty_approved_defects = (parseInt(line.qty_approved_defects || 0) + parseInt(approved_qty));
-        await pool.query('UPDATE app_rows SET json=$1 WHERE id=$2', [JSON.stringify(line), data.dispatch_line_id]);
-      }
-    }
-    res.json({ message: 'ثبت شد' });
-  } catch (err) { res.status(500).json({ error: err.message }); }
-});
-
-app.get('/api/repair-returns', auth, async (req, res) => {
-  try { const r = await pool.query(`SELECT id, json FROM app_rows WHERE collection='repair_returns' ORDER BY (json->>'created_at') DESC`); res.json(r.rows.map(x => safeParse(x.json, x.id))); } catch (err) { res.status(500).json({ error: err.message }); }
-});
-
-app.post('/api/repair-returns', auth, async (req, res) => {
-  if (req.user.role !== 'admin') return res.status(403).json({ error: 'Admin only' });
-  const { delivery_line_id, delivery_id, workshop_id, qty, reason } = req.body;
-  if (!delivery_line_id || !qty || qty <= 0) return res.status(400).json({ error: 'ورودی نامعتبر' });
-  try {
-    const dlRow = await pool.query(`SELECT id, json FROM app_rows WHERE id=$1 AND collection='sewing_delivery_lines'`, [delivery_line_id]);
-    if (!dlRow.rows.length) return res.status(404).json({ error: 'یافت نشد' });
-    const line = safeParse(dlRow.rows[0].json, dlRow.rows[0].id);
-    if (qty > parseInt(line.qty_accepted || 0)) return res.status(400).json({ error: 'بیشتر از تاییدشده است' });
-    line.qty_accepted = parseInt(line.qty_accepted || 0) - qty;
-    line.qty_returned_pending = parseInt(line.qty_returned_pending || 0) + qty;
-    await pool.query('UPDATE app_rows SET json=$1 WHERE id=$2', [JSON.stringify(line), delivery_line_id]);
-    const returnId = 'rr_' + Date.now();
-    const record = { id: returnId, delivery_line_id, delivery_id: delivery_id || '', workshop_id: workshop_id || '', qty_original: qty, qty_repaired: 0, qty_unrepairable: 0, qty_needs_review: 0, reason: reason || '', status: 'pending_workshop_report', created_by: req.user.id, created_at: new Date().toISOString(), workshop_report: null, decisions: [] };
-    await pool.query('INSERT INTO app_rows (id, collection, json) VALUES ($1,$2,$3)', [returnId, 'repair_returns', record]);
-    res.status(201).json({ message: 'ثبت شد', return_id: returnId });
-  } catch (err) { res.status(500).json({ error: err.message }); }
-});
-
-app.put('/api/repair-returns/:id/workshop-report', auth, async (req, res) => {
-  const { qty_repaired, qty_unrepairable, qty_needs_review, note } = req.body;
-  try {
-    const row = await pool.query(`SELECT json FROM app_rows WHERE id=$1 AND collection='repair_returns'`, [req.params.id]);
-    if (!row.rows.length) return res.status(404).json({ error: 'Not found' });
-    const data = safeParse(row.rows[0].json, req.params.id);
-    if (parseInt(qty_repaired||0) + parseInt(qty_unrepairable||0) + parseInt(qty_needs_review||0) !== parseInt(data.qty_original||0)) return res.status(400).json({ error: 'جمع برابر تعداد اولیه نیست' });
-    data.qty_repaired = qty_repaired; data.qty_unrepairable = qty_unrepairable; data.qty_needs_review = qty_needs_review;
-    data.workshop_report = { qty_repaired, qty_unrepairable, qty_needs_review, note: note || '', reported_at: new Date().toISOString() };
-    data.status = 'pending_admin_decision';
-    await pool.query('UPDATE app_rows SET json=$1 WHERE id=$2', [JSON.stringify(data), req.params.id]);
-    res.json({ message: 'گزارش ثبت شد' });
-  } catch (err) { res.status(500).json({ error: err.message }); }
-});
-
-app.put('/api/repair-returns/:id/decide', auth, async (req, res) => {
-  if (req.user.role !== 'admin') return res.status(403).json({ error: 'Admin only' });
-  const { group, decision, note } = req.body;
-  try {
-    const row = await pool.query(`SELECT json FROM app_rows WHERE id=$1 AND collection='repair_returns'`, [req.params.id]);
-    if (!row.rows.length) return res.status(404).json({ error: 'Not found' });
-    const data = safeParse(row.rows[0].json, req.params.id);
-    let qty = group === 'repaired' ? data.qty_repaired : (group === 'unrepairable' ? data.qty_unrepairable : data.qty_needs_review);
-    if (!qty || qty === 0) return res.status(400).json({ error: 'گروه خالی است' });
-    if (!data.decisions) data.decisions = [];
-    data.decisions = data.decisions.filter(d => d.group !== group);
-    data.decisions.push({ group, decision, qty, note: note || '', decided_at: new Date().toISOString() });
-    const dl = await pool.query(`SELECT id, json FROM app_rows WHERE id=$1 AND collection='sewing_delivery_lines'`, [data.delivery_line_id]);
-    if (dl.rows.length) {
-      const line = safeParse(dl.rows[0].json, dl.rows[0].id);
-      if (group === 'repaired' && decision === 'accept') line.qty_accepted = parseInt(line.qty_accepted||0) + qty;
-      else if (group === 'unrepairable' && decision === 'accept_as_scrap') line.qty_scrap = parseInt(line.qty_scrap||0) + qty;
-      else if (group === 'needs_review' && decision === 'accept_repair') line.qty_accepted = parseInt(line.qty_accepted||0) + qty;
-      else if (group === 'needs_review' && decision === 'accept_scrap') line.qty_scrap = parseInt(line.qty_scrap||0) + qty;
-      line.qty_returned_pending = Math.max(0, parseInt(line.qty_returned_pending||0) - qty);
-      await pool.query('UPDATE app_rows SET json=$1 WHERE id=$2', [JSON.stringify(line), data.delivery_line_id]);
-    }
-    const allDecided = ['repaired', 'unrepairable', 'needs_review'].every(g => {
-      const gq = g === 'repaired' ? data.qty_repaired : (g === 'unrepairable' ? data.qty_unrepairable : data.qty_needs_review);
-      return !gq || gq === 0 || data.decisions.some(d => d.group === g);
-    });
-    data.status = allDecided ? 'completed' : 'pending_admin_decision';
-    await pool.query('UPDATE app_rows SET json=$1 WHERE id=$2', [JSON.stringify(data), req.params.id]);
-    res.json({ message: 'ثبت شد' });
-  } catch (err) { res.status(500).json({ error: err.message }); }
-});
-
-app.get('/api/reports/scrap', auth, async (req, res) => {
-  try {
-    const isAdmin = req.user.role === 'admin';
-    const wid = req.user.workshop_id;
-    const defectRows = await pool.query(`SELECT id, json FROM app_rows WHERE collection='cut_defects' AND json->>'status'='reviewed'`);
-    const scrapFromDefects = [];
-    for (const row of defectRows.rows) {
-      const d = safeParse(row.json, row.id);
-      if (!isAdmin && wid && d.workshop_id !== wid && d.workshopId !== wid) continue;
-      if (parseInt(d.approved_qty || 0) > 0) scrapFromDefects.push({ id: d.id, source: 'cut_defect', source_id: d.id, workshop_id: d.workshop_id || d.workshopId, product_id: d.product_id, size_id: d.size_id, qty: parseInt(d.approved_qty), reason: d.defect_type || 'خرابی برش', date: d.reviewed_at || d.created_at });
-    }
-    const returnRows = await pool.query(`SELECT id, json, COALESCE(json->'decisions', '[]'::jsonb) as decisions FROM app_rows WHERE collection='repair_returns' AND json->>'status'='completed'`);
-    const scrapFromReturns = [];
-    for (const row of returnRows.rows) {
-      const r = safeParse(row.json, row.id);
-      if (!isAdmin && wid && r.workshop_id !== wid) continue;
-      for (const dec of (row.decisions || [])) {
-        if (((dec.group === 'unrepairable' && dec.decision === 'accept_as_scrap') || (dec.group === 'needs_review' && dec.decision === 'accept_scrap')) && dec.qty > 0) {
-          scrapFromReturns.push({ id: r.id, source: 'repair_return', source_id: r.id, workshop_id: r.workshop_id, qty: parseInt(dec.qty), reason: r.reason || 'مرجوعی غیرقابل تعمیر', date: dec.decided_at });
-        }
-      }
-    }
-    res.json({ details: [...scrapFromDefects, ...scrapFromReturns] });
-  } catch (err) { res.status(500).json({ error: err.message }); }
-});
-
+// ===== چت و ریست =====
 app.post('/api/chat/send', auth, async (req, res) => {
   const { receiver_id, text } = req.body;
   if (!receiver_id || !text) return res.status(400).json({ error: 'Missing' });
@@ -404,17 +274,17 @@ app.get('/api/chat/contacts', auth, async (req, res) => {
   let q = 'SELECT id, username, role, workshop_id FROM users', p = []; if (req.user.role !== 'admin') { q += ' WHERE role=$1'; p.push('admin'); } const r = await pool.query(q, p); res.json(r.rows);
 });
 app.delete('/api/admin/reset-workshop/:workshopId', auth, async (req, res) => {
-  if (req.user.role !== 'admin') return res.status(403).json({ error: 'Admin only' }); const wid = req.params.workshopId; const cols = ['dispatches','sewing_deliveries','repair_returns','wage_ledger','payments'];
+  if (req.user.role !== 'admin') return res.status(403).json({ error: 'Admin only' }); const wid = req.params.workshopId; const cols = ['dispatches','sewing_deliveries','wage_ledger','payments'];
   try {
     const dR = await pool.query(`SELECT id FROM app_rows WHERE collection='dispatches' AND (json->>'workshop_id'=$1 OR json->>'workshopId'=$1)`, [wid]); const dIds = dR.rows.map(r => r.id);
     const sR = await pool.query(`SELECT id FROM app_rows WHERE collection='sewing_deliveries' AND (json->>'workshop_id'=$1 OR json->>'workshopId'=$1)`, [wid]); const sIds = sR.rows.map(r => r.id);
     if (dIds.length) await pool.query(`DELETE FROM app_rows WHERE collection IN ('dispatch_lines','workshop_receipts','cut_defects','dispatch_size_qty') AND (json->>'dispatch_id'=ANY($1) OR json->>'dispatchId'=ANY($1))`, [dIds]);
-    if (sIds.length) await pool.query(`DELETE FROM app_rows WHERE collection IN ('sewing_delivery_lines','repair_returns') AND (json->>'delivery_id'=ANY($1) OR json->>'deliveryId'=ANY($1))`, [sIds]);
+    if (sIds.length) await pool.query(`DELETE FROM app_rows WHERE collection IN ('sewing_delivery_lines') AND (json->>'delivery_id'=ANY($1) OR json->>'deliveryId'=ANY($1))`, [sIds]);
     await pool.query(`DELETE FROM app_rows WHERE collection=ANY($1) AND (json->>'workshop_id'=$2 OR json->>'workshopId'=$2)`, [cols, wid]); res.json({ message: 'Reset complete' });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 app.delete('/api/admin/clear-all-transactions', auth, async (req, res) => {
-  if (req.user.role !== 'admin') return res.status(403).json({ error: 'Admin only' }); const cols = ['dispatches','dispatch_lines','dispatch_size_qty','workshop_receipts','workshop_receipt_lines','sewing_deliveries','sewing_delivery_lines','cut_defects','repair_returns','wage_ledger','payments','payment_allocations','adjustments','sync_queue','audit_log']; const r = await pool.query('DELETE FROM app_rows WHERE collection=ANY($1)', [cols]); res.json({ message: `Cleared ${r.rowCount} records` });
+  if (req.user.role !== 'admin') return res.status(403).json({ error: 'Admin only' }); const cols = ['dispatches','dispatch_lines','dispatch_size_qty','workshop_receipts','workshop_receipt_lines','sewing_deliveries','sewing_delivery_lines','cut_defects','wage_ledger','payments','payment_allocations','adjustments','sync_queue','audit_log']; const r = await pool.query('DELETE FROM app_rows WHERE collection=ANY($1)', [cols]); res.json({ message: `Cleared ${r.rowCount} records` });
 });
 
 const PORT = process.env.PORT || 3000;
