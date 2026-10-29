@@ -115,14 +115,26 @@ app.post('/api/store/:collection', auth, async (req, res) => {
   try {
     const collection = req.params.collection;
     const data = req.body;
+    
+    // 🛡️ ۴. اعتبارسنجی هوشمند سند خالی
     const validCollections = ['dispatches', 'workshop_receipts', 'sewing_deliveries', 'repair_returns', 'cut_defects'];
     if (validCollections.includes(collection)) {
-      const hasLines = data.lines && data.lines.length > 0;
-      const hasQty = data.qty || data.qty_received || data.qty_original || data.declared_qty;
-      if (!data || Object.keys(data).length === 0 || (!hasLines && !hasQty)) {
-        return res.status(400).json({ error: 'سند خالی قابل ثبت نیست. حداقل یک ردیف یا مقدار معتبر لازم است.' });
+      const jsonStr = JSON.stringify(data);
+      // اگر کل دیتا خالی بود
+      if (!data || jsonStr === '{}' || jsonStr === 'null') {
+        return res.status(400).json({ error: 'سند خالی قابل ثبت نیست.' });
+      }
+      
+      // بررسی اینکه آیا حداقل یک آرایه دارای داده وجود دارد یا فیلد معتبری مثل شماره سند پر شده است
+      const hasArrayData = Object.values(data).some(val => Array.isArray(val) && val.length > 0);
+      const hasQtyData = data.qty || data.total_qty || data.qty_original || data.declared_qty || data.qty_received;
+      const hasHeaderData = data.serial || data.workshop_id || data.dispatch_date || data.date;
+      
+      if (!hasArrayData && !hasQtyData && !hasHeaderData) {
+        return res.status(400).json({ error: 'سند خالی قابل ثبت نیست. اطلاعات وارد شده نامعتبر است.' });
       }
     }
+
     const id = data.id || Date.now().toString();
     await pool.query('INSERT INTO app_rows (id, collection, json) VALUES ($1,$2,$3) ON CONFLICT (id) DO UPDATE SET json=EXCLUDED.json', [id, collection, data]);
     res.json({ message: 'Saved', id });
@@ -185,7 +197,7 @@ app.get('/api/delivery-lines-for-return', auth, async (req, res) => {
 });
 
 // ==========================================
-// آمار داشبورد و هشدارها (اصلاح‌شده)
+// آمار داشبورد و هشدارها
 // ==========================================
 app.get('/api/dashboard/stats', auth, async (req, res) => {
   try {
@@ -196,8 +208,6 @@ app.get('/api/dashboard/stats', auth, async (req, res) => {
     const dispatchQtyRes = await pool.query(`SELECT COALESCE(SUM((json->>'qty')::int), 0) as total FROM app_rows, jsonb_array_elements(json->'lines') l WHERE collection='dispatches' AND (json->>'status' != 'draft') ${filter}`);
     const cutDefectsRes = await pool.query(`SELECT COALESCE(SUM((json->>'declared_qty')::int), 0) as total FROM app_rows WHERE collection='cut_defects' AND json->>'status' IN ('pending', 'reviewed') ${filter}`);
     const deliveryRes = await pool.query(`SELECT COALESCE(SUM((json->>'qty_delivered')::int), 0) as total FROM app_rows, jsonb_array_elements(json->'lines') l WHERE collection='sewing_deliveries' AND (json->>'status' != 'draft') ${filter}`);
-    
-    // ⬇️ اصلاح نام متغیر در این خط انجام شد
     const returnRes = await pool.query(`SELECT COALESCE(SUM((json->>'qty_original')::int), 0) as total FROM app_rows WHERE collection='repair_returns' AND json->>'status' IN ('pending_workshop_report', 'pending_admin_decision', 'completed') ${filter}`);
 
     const [users, workshops, products, pendingReturns, pendingDefects, totalWage, scrapTotal] = await Promise.all([
@@ -213,8 +223,6 @@ app.get('/api/dashboard/stats', auth, async (req, res) => {
     const rawDispatch = parseInt(dispatchQtyRes.rows[0].total) || 0;
     const liveDefects = parseInt(cutDefectsRes.rows[0].total) || 0;
     const rawDelivery = parseInt(deliveryRes.rows[0].total) || 0;
-    
-    // ⬇️ استفاده از متغیر اصلاح شده
     const liveReturns = parseInt(returnRes.rows[0].total) || 0;
 
     res.json({
@@ -254,7 +262,7 @@ app.get('/api/dashboard/alerts', auth, async (req, res) => {
 });
 
 // ==========================================
-// سایر APIها
+// سایر APIها (خرابی، مرجوعی، ضایعات، چت)
 // ==========================================
 app.put('/api/cut-defects/:id/decide', auth, async (req, res) => {
   if (req.user.role !== 'admin') return res.status(403).json({ error: 'Admin only' });
