@@ -295,7 +295,7 @@ app.put('/api/repair-returns/:id/decide', auth, async (req, res) => {
 });
 
 // ==========================================
-// گزارش ضایعات (اصلاح‌شده برای جلوگیری از 502)
+// گزارش ضایعات (اصلاح‌شده با COALESCE)
 // ==========================================
 app.get('/api/reports/scrap', auth, async (req, res) => {
   try {
@@ -312,7 +312,6 @@ app.get('/api/reports/scrap', auth, async (req, res) => {
       }
     }
     
-    // 🔑 اصلاح کلیدی: استفاده از COALESCE برای جلوگیری از خطای null در decisions
     const returnRows = await pool.query(`
       SELECT json, COALESCE(json->'decisions', '[]'::jsonb) as decisions 
       FROM app_rows 
