@@ -39,14 +39,14 @@ const auth = (req, res, next) => {
   catch (err) { res.status(401).json({ error: 'Invalid token' }); }
 };
 
-// 🛡️ تابع کمکی برای اطمینان از اینکه JSON حتماً یک آبجکت است
+// 🛡️ تابع کمکی برای اطمینان از اینکه JSON حتماً یک آبجکت معتبر است و id دارد
 const safeParse = (data, dbId) => {
   let obj = data;
   if (typeof obj === 'string') {
     try { obj = JSON.parse(obj); } catch(e) { obj = {}; }
   }
   if (!obj || typeof obj !== 'object' || Array.isArray(obj)) obj = {};
-  return { ...obj, id: obj.id || dbId };
+  return { ...obj, id: obj.id || dbId || Math.random().toString(36).substring(7) };
 };
 
 app.get('/', (req, res) => res.send('HighFit Backend is running perfectly!'));
@@ -113,7 +113,7 @@ app.delete('/api/admin/users/:id', auth, async (req, res) => {
   res.json({ message: 'Deleted' });
 });
 
-// 🛡️ امن‌سازی Store
+// 🎯 Store عمومی (تزریق id و امن‌سازی)
 app.get('/api/store/:collection', auth, async (req, res) => {
   try {
     const r = await pool.query('SELECT id, json FROM app_rows WHERE collection=$1', [req.params.collection]);
@@ -138,13 +138,16 @@ app.delete('/api/store/:collection/:id', auth, async (req, res) => {
   catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// 🛡️ امن‌سازی Cut Defects
+// 🎯 لیست خرابی برش (اصلاح‌شده و تضمین id)
 app.get('/api/cut-defects', auth, async (req, res) => {
   try {
     const r = await pool.query(`SELECT id, json FROM app_rows WHERE collection='cut_defects' ORDER BY (json->>'created_at') DESC`);
-    const safeRows = r.rows.map(x => safeParse(x.json, x.id));
+    const safeRows = r.rows.map(row => safeParse(row.json, row.id));
     res.json(safeRows);
-  } catch (err) { res.status(500).json({ error: err.message }); }
+  } catch (err) { 
+    console.error("Cut Defects Error:", err);
+    res.status(500).json({ error: 'خطا در خواندن لیست خرابی‌ها' }); 
+  }
 });
 
 app.get('/api/delivery-lines-for-return', auth, async (req, res) => {
@@ -185,7 +188,9 @@ app.get('/api/delivery-lines-for-return', auth, async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// 🛡️ امن‌سازی آمار داشبورد
+// ==========================================
+// 🎯 آمار داشبورد (پاسخ مسطح و امن)
+// ==========================================
 app.get('/api/dashboard/stats', auth, async (req, res) => {
   let response = { users: 0, workshops: 0, products: 0, dispatches: 0, actual_dispatched: 0, deliveries: 0, actual_delivered: 0, pending_returns: 0, pending_defects: 0, total_wage: 0, total_scrap: 0, scrap_from_cut: 0, scrap_from_sewing: 0 };
   try {
