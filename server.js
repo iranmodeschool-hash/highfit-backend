@@ -12,6 +12,7 @@ const app = express();
 app.use(express.json({ limit: '50mb' }));
 app.use(cors());
 
+// ⚙️ تنظیمات بهینه‌شده برای جلوگیری از Timeout
 const pool = new Pool({
   host: process.env.DB_HOST || 'localhost',
   port: process.env.DB_PORT || 5432,
@@ -19,7 +20,9 @@ const pool = new Pool({
   password: process.env.DB_PASSWORD,
   database: process.env.DB_NAME || 'highfit-core-db',
   ssl: process.env.DB_HOST ? false : { rejectUnauthorized: false },
-  max: 5, idleTimeoutMillis: 30000, connectionTimeoutMillis: 2000,
+  max: 15, // افزایش تعداد کانکشن‌های همزمان
+  idleTimeoutMillis: 60000, // بستن کانکشن‌های بیکار بعد از ۱ دقیقه
+  connectionTimeoutMillis: 15000, // افزایش تایم‌اوت اتصال به ۱۵ ثانیه
 });
 
 const createTables = async () => {
@@ -39,30 +42,35 @@ const auth = (req, res, next) => {
   catch (err) { res.status(401).json({ error: 'Invalid token' }); }
 };
 
-// ===== بازمحاسبه دستمزد =====
+// ===== بازمحاسبه دستمزد (مقاوم‌سازی شده در برابر خطا) =====
 const recalcWageForDelivery = async (deliveryId) => {
   if (!deliveryId) return;
-  const linesResult = await pool.query(
-    `SELECT json FROM app_rows WHERE collection='sewing_delivery_lines' AND (json->>'delivery_id'=$1 OR json->>'deliveryId'=$1)`,
-    [deliveryId]
-  );
-  let totalAccepted = 0;
-  for (const row of linesResult.rows) totalAccepted += parseInt(row.json.qty_accepted || 0);
-  
-  const wlResult = await pool.query(
-    `SELECT id, json FROM app_rows WHERE collection='wage_ledger' AND (json->>'source_id'=$1 OR json->>'sourceId'=$1) AND json->>'source_type'='sewing_delivery'`,
-    [deliveryId]
-  );
-  if (wlResult.rows.length > 0) {
-    const wl = wlResult.rows[0];
-    const rate = parseFloat(wl.json.rate_amount_snapshot || 0);
-    const adj = parseFloat(wl.json.adjustment_amount || 0);
-    wl.json.qty_base = totalAccepted;
-    wl.json.gross_amount = totalAccepted * rate;
-    wl.json.net_amount = (totalAccepted * rate) + adj;
-    await pool.query('UPDATE app_rows SET json=$1 WHERE id=$2', [JSON.stringify(wl.json), wl.id]);
+  try {
+    const linesResult = await pool.query(
+      `SELECT json FROM app_rows WHERE collection='sewing_delivery_lines' AND (json->>'delivery_id'=$1 OR json->>'deliveryId'=$1)`,
+      [deliveryId]
+    );
+    let totalAccepted = 0;
+    for (const row of linesResult.rows) totalAccepted += parseInt(row.json.qty_accepted || 0);
+    
+    const wlResult = await pool.query(
+      `SELECT id, json FROM app_rows WHERE collection='wage_ledger' AND (json->>'source_id'=$1 OR json->>'sourceId'=$1) AND json->>'source_type'='sewing_delivery'`,
+      [deliveryId]
+    );
+    if (wlResult.rows.length > 0) {
+      const wl = wlResult.rows[0];
+      const rate = parseFloat(wl.json.rate_amount_snapshot || 0);
+      const adj = parseFloat(wl.json.adjustment_amount || 0);
+      wl.json.qty_base = totalAccepted;
+      wl.json.gross_amount = totalAccepted * rate;
+      wl.json.net_amount = (totalAccepted * rate) + adj;
+      await pool.query('UPDATE app_rows SET json=$1 WHERE id=$2', [JSON.stringify(wl.json), wl.id]);
+    }
+    return totalAccepted;
+  } catch (err) {
+    console.error("خطا در بازمحاسبه دستمزد:", err.message);
+    return null; // خطا را پرتاب نمی‌کنیم تا کل درخواست مرجوعی خراب نشود
   }
-  return totalAccepted;
 };
 
 app.get('/', (req, res) => res.send('HighFit Backend is running perfectly!'));
@@ -129,7 +137,7 @@ app.delete('/api/admin/users/:id', auth, async (req, res) => {
   res.json({ message: 'Deleted' });
 });
 
-// ===== Store عمومی (بدون تغییر) =====
+// ===== Store عمومی =====
 app.get('/api/store/:collection', auth, async (req, res) => {
   try {
     const r = await pool.query('SELECT id, json FROM app_rows WHERE collection=$1', [req.params.collection]);
@@ -184,7 +192,6 @@ app.put('/api/cut-defects/:id/decide', auth, async (req, res) => {
     };
     await pool.query('UPDATE app_rows SET json=$1 WHERE id=$2', [JSON.stringify(updated), id]);
     
-    // اثر روی dispatch_line
     if (approved > 0 && data.dispatch_line_id) {
       const dl = await pool.query(`SELECT id, json FROM app_rows WHERE id=$1 AND collection='dispatch_lines'`, [data.dispatch_line_id]);
       if (dl.rows.length) {
@@ -250,7 +257,6 @@ app.put('/api/repair-returns/:id/workshop-report', auth, async (req, res) => {
     if (!row.rows.length) return res.status(404).json({ error: 'Not found' });
     
     const data = row.rows[0].json;
-    // چک دسترسی کارگاه
     if (req.user.role === 'workshop_manager' && String(data.workshop_id) !== String(req.user.workshop_id)) {
       return res.status(403).json({ error: 'دسترسی ندارید' });
     }
@@ -302,7 +308,6 @@ app.put('/api/repair-returns/:id/decide', auth, async (req, res) => {
     data.decisions = data.decisions.filter(d => d.group !== group);
     data.decisions.push({ group, decision, qty, note: note || '', decided_at: new Date().toISOString(), decided_by: req.user.id });
     
-    // اثر بر delivery_line
     const dl = await pool.query(`SELECT id, json FROM app_rows WHERE id=$1 AND collection='sewing_delivery_lines'`, [data.delivery_line_id]);
     if (dl.rows.length) {
       const line = dl.rows[0].json;
@@ -322,7 +327,6 @@ app.put('/api/repair-returns/:id/decide', auth, async (req, res) => {
       await pool.query('UPDATE app_rows SET json=$1 WHERE id=$2', [JSON.stringify(line), data.delivery_line_id]);
     }
     
-    // چک همه گروه‌ها تصمیم گرفتند
     const allDecided = ['repaired', 'unrepairable', 'needs_review'].every(g => {
       const gq = g === 'repaired' ? parseInt(data.qty_repaired || 0) : g === 'unrepairable' ? parseInt(data.qty_unrepairable || 0) : parseInt(data.qty_needs_review || 0);
       if (gq === 0) return true;
@@ -394,7 +398,7 @@ app.get('/api/reports/scrap', auth, async (req, res) => {
 });
 
 // ==========================================
-// آمار داشبورد (شامل total_scrap)
+// آمار داشبورد
 // ==========================================
 app.get('/api/dashboard/stats', auth, async (req, res) => {
   try {
@@ -430,7 +434,7 @@ app.get('/api/dashboard/stats', auth, async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// ===== چت (بدون تغییر) =====
+// ===== چت =====
 app.post('/api/chat/send', auth, async (req, res) => {
   const { receiver_id, text } = req.body;
   if (!receiver_id || !text) return res.status(400).json({ error: 'Missing' });
