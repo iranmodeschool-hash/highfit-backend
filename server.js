@@ -103,7 +103,7 @@ app.delete('/api/admin/users/:id', auth, async (req, res) => {
   res.json({ message: 'Deleted' });
 });
 
-// ===== Store عمومی =====
+// ===== Store عمومی (حذف اعتبارسنجی سخت‌گیرانه) =====
 app.get('/api/store/:collection', auth, async (req, res) => {
   try {
     const r = await pool.query('SELECT id, json FROM app_rows WHERE collection=$1', [req.params.collection]);
@@ -115,15 +115,12 @@ app.post('/api/store/:collection', auth, async (req, res) => {
   try {
     const collection = req.params.collection;
     const data = req.body;
-    const validCollections = ['dispatches', 'workshop_receipts', 'sewing_deliveries', 'repair_returns', 'cut_defects'];
-    if (validCollections.includes(collection)) {
-      const jsonStr = JSON.stringify(data);
-      if (!data || jsonStr === '{}' || jsonStr === 'null') return res.status(400).json({ error: 'سند خالی قابل ثبت نیست.' });
-      const hasArrayData = Object.values(data).some(val => Array.isArray(val) && val.length > 0);
-      const hasQtyData = data.qty || data.total_qty || data.qty_original || data.declared_qty || data.qty_received;
-      const hasHeaderData = data.serial || data.workshop_id || data.dispatch_date || data.date;
-      if (!hasArrayData && !hasQtyData && !hasHeaderData) return res.status(400).json({ error: 'سند خالی قابل ثبت نیست. اطلاعات وارد شده نامعتبر است.' });
+    
+    // اعتبارسنجی ساده‌شده: فقط چک می‌کنیم که آبجکت خالی نباشد
+    if (!data || Object.keys(data).length === 0) {
+      return res.status(400).json({ error: 'سند خالی قابل ثبت نیست.' });
     }
+
     const id = data.id || Date.now().toString();
     await pool.query('INSERT INTO app_rows (id, collection, json) VALUES ($1,$2,$3) ON CONFLICT (id) DO UPDATE SET json=EXCLUDED.json', [id, collection, data]);
     res.json({ message: 'Saved', id });
@@ -135,7 +132,7 @@ app.delete('/api/store/:collection/:id', auth, async (req, res) => {
   catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// 🆕 اضافه کردن مسیر مستقیم برای لیست خرابی برش (طبق درخواست بازار استودیو)
+// 🆕 مسیر مستقیم لیست خرابی برش (همانطور که در تست اتصال دیدید)
 app.get('/api/cut-defects', auth, async (req, res) => {
   try {
     const r = await pool.query(`SELECT json FROM app_rows WHERE collection='cut_defects' ORDER BY (json->>'created_at') DESC`);
@@ -182,7 +179,7 @@ app.get('/api/delivery-lines-for-return', auth, async (req, res) => {
 });
 
 // ==========================================
-// آمار داشبورد (ساختار دقیقاً طبق خواسته بازار استودیو)
+// 🎯 آمار داشبورد (بسته‌بندی شده در stats برای تطابق کامل با فرانت‌اند)
 // ==========================================
 app.get('/api/dashboard/stats', auth, async (req, res) => {
   let response = {
@@ -210,7 +207,7 @@ app.get('/api/dashboard/stats', auth, async (req, res) => {
     const p = await pool.query(`SELECT COUNT(*) FROM app_rows WHERE collection='products'${filter}`);
     response.products = parseInt(p.rows[0].count) || 0;
 
-    // 4. Dispatches (Sum of qty inside lines)
+    // 4. Dispatches
     let totalDispatched = 0;
     const d = await pool.query(`SELECT json FROM app_rows WHERE collection='dispatches'${filter}`);
     for (const row of d.rows) {
@@ -236,7 +233,7 @@ app.get('/api/dashboard/stats', auth, async (req, res) => {
     response.pending_defects = pendingDefectsCount;
     response.scrap_from_cut = scrapFromCut;
 
-    // 6. Deliveries (Sum of qty_delivered)
+    // 6. Deliveries
     let totalDelivered = 0;
     const dl = await pool.query(`SELECT json FROM app_rows WHERE collection='sewing_delivery_lines'`);
     for (const row of dl.rows) {
@@ -281,7 +278,11 @@ app.get('/api/dashboard/stats', auth, async (req, res) => {
     console.error("Dashboard Stats Error:", err);
   }
   
-  res.json(response);
+  // 🎯 مهم‌ترین تغییر: پاسخ درون کلید stats قرار می‌گیرد
+  res.json({
+    stats: response,
+    errors: {}
+  });
 });
 
 app.get('/api/dashboard/alerts', auth, async (req, res) => {
