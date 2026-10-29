@@ -103,11 +103,11 @@ app.delete('/api/admin/users/:id', auth, async (req, res) => {
   res.json({ message: 'Deleted' });
 });
 
-// ===== Store عمومی (حذف اعتبارسنجی سخت‌گیرانه) =====
+// 🎯 اصلاح کلیدی: تزریق id از ستون دیتابیس به JSON
 app.get('/api/store/:collection', auth, async (req, res) => {
   try {
     const r = await pool.query('SELECT id, json FROM app_rows WHERE collection=$1', [req.params.collection]);
-    res.json(r.rows.map(x => x.json));
+    res.json(r.rows.map(x => ({ ...x.json, id: x.json.id || x.id })));
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
@@ -115,12 +115,7 @@ app.post('/api/store/:collection', auth, async (req, res) => {
   try {
     const collection = req.params.collection;
     const data = req.body;
-    
-    // اعتبارسنجی ساده‌شده: فقط چک می‌کنیم که آبجکت خالی نباشد
-    if (!data || Object.keys(data).length === 0) {
-      return res.status(400).json({ error: 'سند خالی قابل ثبت نیست.' });
-    }
-
+    if (!data || Object.keys(data).length === 0) return res.status(400).json({ error: 'سند خالی قابل ثبت نیست.' });
     const id = data.id || Date.now().toString();
     await pool.query('INSERT INTO app_rows (id, collection, json) VALUES ($1,$2,$3) ON CONFLICT (id) DO UPDATE SET json=EXCLUDED.json', [id, collection, data]);
     res.json({ message: 'Saved', id });
@@ -132,11 +127,11 @@ app.delete('/api/store/:collection/:id', auth, async (req, res) => {
   catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// 🆕 مسیر مستقیم لیست خرابی برش (همانطور که در تست اتصال دیدید)
+// 🎯 اصلاح کلیدی: تزریق id در لیست خرابی‌ها
 app.get('/api/cut-defects', auth, async (req, res) => {
   try {
-    const r = await pool.query(`SELECT json FROM app_rows WHERE collection='cut_defects' ORDER BY (json->>'created_at') DESC`);
-    res.json(r.rows.map(x => x.json));
+    const r = await pool.query(`SELECT id, json FROM app_rows WHERE collection='cut_defects' ORDER BY (json->>'created_at') DESC`);
+    res.json(r.rows.map(x => ({ ...x.json, id: x.json.id || x.id })));
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
@@ -145,15 +140,15 @@ app.get('/api/delivery-lines-for-return', auth, async (req, res) => {
     const isAdmin = req.user.role === 'admin';
     const wid = req.user.workshop_id;
     const deliveries = await pool.query(`SELECT json FROM app_rows WHERE collection='sewing_deliveries'`);
-    const deliveryLines = await pool.query(`SELECT json FROM app_rows WHERE collection='sewing_delivery_lines'`);
-    const dispatchLines = await pool.query(`SELECT json FROM app_rows WHERE collection='dispatch_lines'`);
-    const products = await pool.query(`SELECT json FROM app_rows WHERE collection='products'`);
-    const sizes = await pool.query(`SELECT json FROM app_rows WHERE collection='sizes'`);
+    const deliveryLines = await pool.query(`SELECT id, json FROM app_rows WHERE collection='sewing_delivery_lines'`);
+    const dispatchLines = await pool.query(`SELECT id, json FROM app_rows WHERE collection='dispatch_lines'`);
+    const products = await pool.query(`SELECT id, json FROM app_rows WHERE collection='products'`);
+    const sizes = await pool.query(`SELECT id, json FROM app_rows WHERE collection='sizes'`);
 
     const deliveriesMap = {}; deliveries.rows.forEach(r => deliveriesMap[r.json.id] = r.json);
-    const dispatchLinesMap = {}; dispatchLines.rows.forEach(r => dispatchLinesMap[r.json.id] = r.json);
-    const productsMap = {}; products.rows.forEach(r => productsMap[r.json.id] = r.json);
-    const sizesMap = {}; sizes.rows.forEach(r => sizesMap[r.json.id] = r.json);
+    const dispatchLinesMap = {}; dispatchLines.rows.forEach(r => dispatchLinesMap[r.json.id || r.id] = r.json);
+    const productsMap = {}; products.rows.forEach(r => productsMap[r.json.id || r.id] = r.json);
+    const sizesMap = {}; sizes.rows.forEach(r => sizesMap[r.json.id || r.id] = r.json);
 
     const result = [];
     for (const row of deliveryLines.rows) {
@@ -172,15 +167,13 @@ app.get('/api/delivery-lines-for-return', auth, async (req, res) => {
       const maxReturnable = currentAccepted - alreadyReturned;
       if (maxReturnable <= 0) continue;
 
-      result.push({ line_id: line.id, delivery_id: delivery.id, serial: delivery.serial || delivery.id, product_name: product.name || 'نامشخص', product_code: product.code || '', size_name: size.name || 'نامشخص', max_returnable: maxReturnable, workshop_id: delivery.workshop_id || delivery.workshopId });
+      result.push({ line_id: line.id || row.id, delivery_id: delivery.id, serial: delivery.serial || delivery.id, product_name: product.name || 'نامشخص', product_code: product.code || '', size_name: size.name || 'نامشخص', max_returnable: maxReturnable, workshop_id: delivery.workshop_id || delivery.workshopId });
     }
     res.json(result);
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// ==========================================
-// 🎯 آمار داشبورد (بسته‌بندی شده در stats برای تطابق کامل با فرانت‌اند)
-// ==========================================
+// 🎯 آمار داشبورد (مسطح - نه درون stats)
 app.get('/api/dashboard/stats', auth, async (req, res) => {
   let response = {
     users: 0, workshops: 0, products: 0, dispatches: 0, actual_dispatched: 0,
@@ -193,36 +186,27 @@ app.get('/api/dashboard/stats', auth, async (req, res) => {
     const wid = req.user.workshop_id;
     const filter = !isAdmin && wid ? ` AND (json->>'workshop_id' = '${wid}' OR json->>'workshopId' = '${wid}')` : '';
 
-    // 1. Users
     if (isAdmin) {
       const u = await pool.query('SELECT COUNT(*) FROM users');
       response.users = parseInt(u.rows[0].count) || 0;
     }
 
-    // 2. Workshops
     const w = await pool.query(`SELECT COUNT(*) FROM app_rows WHERE collection='workshops'${filter}`);
     response.workshops = parseInt(w.rows[0].count) || 0;
 
-    // 3. Products
     const p = await pool.query(`SELECT COUNT(*) FROM app_rows WHERE collection='products'${filter}`);
     response.products = parseInt(p.rows[0].count) || 0;
 
-    // 4. Dispatches
     let totalDispatched = 0;
     const d = await pool.query(`SELECT json FROM app_rows WHERE collection='dispatches'${filter}`);
     for (const row of d.rows) {
       if (row.json && Array.isArray(row.json.lines)) {
-        for (const line of row.json.lines) {
-          totalDispatched += parseInt(line.qty) || 0;
-        }
+        for (const line of row.json.lines) totalDispatched += parseInt(line.qty) || 0;
       }
     }
     response.dispatches = totalDispatched;
 
-    // 5. Defects (Cut)
-    let totalDefects = 0;
-    let pendingDefectsCount = 0;
-    let scrapFromCut = 0;
+    let totalDefects = 0, pendingDefectsCount = 0, scrapFromCut = 0;
     const df = await pool.query(`SELECT json FROM app_rows WHERE collection='cut_defects' AND json->>'status' IN ('pending', 'reviewed') ${filter}`);
     for (const row of df.rows) {
       totalDefects += parseInt(row.json.declared_qty) || 0;
@@ -233,29 +217,19 @@ app.get('/api/dashboard/stats', auth, async (req, res) => {
     response.pending_defects = pendingDefectsCount;
     response.scrap_from_cut = scrapFromCut;
 
-    // 6. Deliveries
     let totalDelivered = 0;
     const dl = await pool.query(`SELECT json FROM app_rows WHERE collection='sewing_delivery_lines'`);
-    for (const row of dl.rows) {
-      totalDelivered += parseInt(row.json.qty_delivered) || 0;
-    }
+    for (const row of dl.rows) totalDelivered += parseInt(row.json.qty_delivered) || 0;
     response.deliveries = totalDelivered;
 
-    // 7. Returns & Scrap from Sewing
-    let totalReturns = 0;
-    let pendingReturnsCount = 0;
-    let scrapFromSewing = 0;
+    let totalReturns = 0, pendingReturnsCount = 0, scrapFromSewing = 0;
     const r = await pool.query(`SELECT json FROM app_rows WHERE collection='repair_returns' AND json->>'status' IN ('pending_workshop_report', 'pending_admin_decision', 'completed') ${filter}`);
     for (const row of r.rows) {
       totalReturns += parseInt(row.json.qty_original) || 0;
-      if (row.json.status === 'pending_workshop_report' || row.json.status === 'pending_admin_decision') {
-        pendingReturnsCount++;
-      }
-      if (row.json.status === 'completed' && row.json.decisions && Array.isArray(row.json.decisions)) {
+      if (row.json.status === 'pending_workshop_report' || row.json.status === 'pending_admin_decision') pendingReturnsCount++;
+      if (row.json.status === 'completed' && Array.isArray(row.json.decisions)) {
         for (const dec of row.json.decisions) {
-          if ((dec.group === 'unrepairable' && dec.decision === 'accept_as_scrap') || (dec.group === 'needs_review' && dec.decision === 'accept_scrap')) {
-            scrapFromSewing += parseInt(dec.qty) || 0;
-          }
+          if ((dec.group === 'unrepairable' && dec.decision === 'accept_as_scrap') || (dec.group === 'needs_review' && dec.decision === 'accept_scrap')) scrapFromSewing += parseInt(dec.qty) || 0;
         }
       }
     }
@@ -263,26 +237,18 @@ app.get('/api/dashboard/stats', auth, async (req, res) => {
     response.pending_returns = pendingReturnsCount;
     response.scrap_from_sewing = scrapFromSewing;
 
-    // 8. Total Wage
     let totalWage = 0;
     const tw = await pool.query(`SELECT json FROM app_rows WHERE collection='wage_ledger'`);
-    for (const row of tw.rows) {
-      totalWage += parseFloat(row.json.net_amount) || 0;
-    }
+    for (const row of tw.rows) totalWage += parseFloat(row.json.net_amount) || 0;
     response.total_wage = totalWage;
 
-    // 9. Total Scrap
     response.total_scrap = scrapFromCut + scrapFromSewing;
 
   } catch (err) {
     console.error("Dashboard Stats Error:", err);
   }
   
-  // 🎯 مهم‌ترین تغییر: پاسخ درون کلید stats قرار می‌گیرد
-  res.json({
-    stats: response,
-    errors: {}
-  });
+  res.json(response);
 });
 
 app.get('/api/dashboard/alerts', auth, async (req, res) => {
@@ -307,9 +273,6 @@ app.get('/api/dashboard/alerts', auth, async (req, res) => {
   } catch (err) { res.json([]); }
 });
 
-// ==========================================
-// سایر APIها (خرابی، مرجوعی، ضایعات، چت)
-// ==========================================
 app.put('/api/cut-defects/:id/decide', auth, async (req, res) => {
   if (req.user.role !== 'admin') return res.status(403).json({ error: 'Admin only' });
   const { id } = req.params; const { approved_qty, rejected_qty, corrected_qty, note } = req.body;
@@ -333,7 +296,7 @@ app.put('/api/cut-defects/:id/decide', auth, async (req, res) => {
 });
 
 app.get('/api/repair-returns', auth, async (req, res) => {
-  try { const r = await pool.query(`SELECT json FROM app_rows WHERE collection='repair_returns' ORDER BY (json->>'created_at') DESC`); res.json(r.rows.map(x => x.json)); } catch (err) { res.status(500).json({ error: err.message }); }
+  try { const r = await pool.query(`SELECT id, json FROM app_rows WHERE collection='repair_returns' ORDER BY (json->>'created_at') DESC`); res.json(r.rows.map(x => ({ ...x.json, id: x.json.id || x.id }))); } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
 app.post('/api/repair-returns', auth, async (req, res) => {
@@ -406,21 +369,21 @@ app.get('/api/reports/scrap', auth, async (req, res) => {
   try {
     const isAdmin = req.user.role === 'admin';
     const wid = req.user.workshop_id;
-    const defectRows = await pool.query(`SELECT json FROM app_rows WHERE collection='cut_defects' AND json->>'status'='reviewed'`);
+    const defectRows = await pool.query(`SELECT id, json FROM app_rows WHERE collection='cut_defects' AND json->>'status'='reviewed'`);
     const scrapFromDefects = [];
     for (const row of defectRows.rows) {
       const d = row.json;
       if (!isAdmin && wid && d.workshop_id !== wid && d.workshopId !== wid) continue;
-      if (parseInt(d.approved_qty || 0) > 0) scrapFromDefects.push({ source: 'cut_defect', source_id: d.id, workshop_id: d.workshop_id || d.workshopId, product_id: d.product_id, size_id: d.size_id, qty: parseInt(d.approved_qty), reason: d.defect_type || 'خرابی برش', date: d.reviewed_at || d.created_at });
+      if (parseInt(d.approved_qty || 0) > 0) scrapFromDefects.push({ id: d.id || row.id, source: 'cut_defect', source_id: d.id || row.id, workshop_id: d.workshop_id || d.workshopId, product_id: d.product_id, size_id: d.size_id, qty: parseInt(d.approved_qty), reason: d.defect_type || 'خرابی برش', date: d.reviewed_at || d.created_at });
     }
-    const returnRows = await pool.query(`SELECT json, COALESCE(json->'decisions', '[]'::jsonb) as decisions FROM app_rows WHERE collection='repair_returns' AND json->>'status'='completed'`);
+    const returnRows = await pool.query(`SELECT id, json, COALESCE(json->'decisions', '[]'::jsonb) as decisions FROM app_rows WHERE collection='repair_returns' AND json->>'status'='completed'`);
     const scrapFromReturns = [];
     for (const row of returnRows.rows) {
       const r = row.json;
       if (!isAdmin && wid && r.workshop_id !== wid) continue;
       for (const dec of (row.decisions || [])) {
         if (((dec.group === 'unrepairable' && dec.decision === 'accept_as_scrap') || (dec.group === 'needs_review' && dec.decision === 'accept_scrap')) && dec.qty > 0) {
-          scrapFromReturns.push({ source: 'repair_return', source_id: r.id, workshop_id: r.workshop_id, qty: parseInt(dec.qty), reason: r.reason || 'مرجوعی غیرقابل تعمیر', date: dec.decided_at });
+          scrapFromReturns.push({ id: r.id || row.id, source: 'repair_return', source_id: r.id || row.id, workshop_id: r.workshop_id, qty: parseInt(dec.qty), reason: r.reason || 'مرجوعی غیرقابل تعمیر', date: dec.decided_at });
         }
       }
     }
@@ -437,7 +400,8 @@ app.post('/api/chat/send', auth, async (req, res) => {
 app.get('/api/chat/messages/:contactId', auth, async (req, res) => {
   const myId = req.user.id, cid = req.params.contactId;
   await pool.query(`UPDATE app_rows SET json=jsonb_set(json,'{status}','"delivered"') WHERE collection='messages' AND json->>'sender_id'=$1 AND json->>'receiver_id'=$2 AND json->>'status'='sent'`, [cid, myId]);
-  const r = await pool.query(`SELECT json FROM app_rows WHERE collection='messages' AND ((json->>'sender_id'=$1 AND json->>'receiver_id'=$2) OR (json->>'sender_id'=$2 AND json->>'receiver_id'=$1)) ORDER BY (json->>'created_at') ASC`, [myId, cid]); res.json(r.rows.map(x => x.json));
+  const r = await pool.query(`SELECT id, json FROM app_rows WHERE collection='messages' AND ((json->>'sender_id'=$1 AND json->>'receiver_id'=$2) OR (json->>'sender_id'=$2 AND json->>'receiver_id'=$1)) ORDER BY (json->>'created_at') ASC`, [myId, cid]);
+  res.json(r.rows.map(x => ({ ...x.json, id: x.json.id || x.id })));
 });
 app.put('/api/chat/seen/:contactId', auth, async (req, res) => {
   await pool.query(`UPDATE app_rows SET json=jsonb_set(json,'{status}','"seen"') WHERE collection='messages' AND json->>'sender_id'=$1 AND json->>'receiver_id'=$2 AND json->>'status' IN ('sent','delivered')`, [req.params.contactId, req.user.id]); res.json({ message: 'Seen' });
