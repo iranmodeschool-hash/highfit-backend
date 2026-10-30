@@ -3,8 +3,10 @@ const { Pool } = require('pg');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const cors = require('cors');
+const crypto = require('crypto');
 require('dotenv').config();
 
+// 🛡️ محافظ‌های سراسری
 process.on('unhandledRejection', (reason) => console.error('Unhandled:', reason));
 process.on('uncaughtException', (err) => console.error('Uncaught:', err));
 
@@ -12,6 +14,7 @@ const app = express();
 app.use(express.json({ limit: '50mb' }));
 app.use(cors());
 
+// ⚙️ تنظیمات دیتابیس
 const pool = new Pool({
   host: process.env.DB_HOST || 'localhost',
   port: process.env.DB_PORT || 5432,
@@ -32,6 +35,7 @@ const createTables = async () => {
 };
 createTables();
 
+// 🔑 احراز هویت
 const auth = (req, res, next) => {
   const h = req.headers.authorization;
   if (!h) return res.status(401).json({ error: 'No token' });
@@ -39,10 +43,11 @@ const auth = (req, res, next) => {
   catch (err) { res.status(401).json({ error: 'Invalid token' }); }
 };
 
+// 🛡️ تابع امن‌سازی داده‌ها (ضد کرش)
 const safeParse = (data, dbId) => {
   let obj = data;
   if (typeof obj === 'string') {
-    try { obj = JSON.parse(obj); } catch (e) { obj = {}; }
+    try { obj = JSON.parse(obj); } catch(e) { obj = {}; }
   }
   if (!obj || typeof obj !== 'object' || Array.isArray(obj)) obj = {};
   return { ...obj, id: obj.id || dbId || Math.random().toString(36).substring(7) };
@@ -50,6 +55,7 @@ const safeParse = (data, dbId) => {
 
 app.get('/', (req, res) => res.send('HighFit Backend is running perfectly!'));
 
+// 🚀 راه‌اندازی ادمین اولیه
 app.get('/api/force-create-admin', async (req, res) => {
   const { email, password } = req.query;
   try {
@@ -61,6 +67,7 @@ app.get('/api/force-create-admin', async (req, res) => {
   } catch (err) { res.status(500).send(err.message); }
 });
 
+// ورود
 app.post('/api/login', async (req, res) => {
   const { email, password, app_name } = req.body;
   try {
@@ -74,6 +81,7 @@ app.post('/api/login', async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
+// ===== مدیریت کاربران =====
 app.get('/api/admin/users', auth, async (req, res) => {
   if (req.user.role !== 'admin') return res.status(403).json({ error: 'Admin only' });
   const r = await pool.query('SELECT id, username, email, role, workshop_id, allowed_apps, created_at FROM users ORDER BY id DESC');
@@ -112,7 +120,7 @@ app.delete('/api/admin/users/:id', auth, async (req, res) => {
   res.json({ message: 'Deleted' });
 });
 
-// ===== Store عمومی =====
+// ===== Store عمومی (برای همه منوها) =====
 app.get('/api/store/:collection', auth, async (req, res) => {
   try {
     const r = await pool.query('SELECT id, json FROM app_rows WHERE collection=$1', [req.params.collection]);
