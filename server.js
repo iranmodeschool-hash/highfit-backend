@@ -39,11 +39,10 @@ const auth = (req, res, next) => {
   catch (err) { res.status(401).json({ error: 'Invalid token' }); }
 };
 
-// 🛡️ تابع امن برای جلوگیری از کرش
 const safeParse = (data, dbId) => {
   let obj = data;
   if (typeof obj === 'string') {
-    try { obj = JSON.parse(obj); } catch(e) { obj = {}; }
+    try { obj = JSON.parse(obj); } catch (e) { obj = {}; }
   }
   if (!obj || typeof obj !== 'object' || Array.isArray(obj)) obj = {};
   return { ...obj, id: obj.id || dbId || Math.random().toString(36).substring(7) };
