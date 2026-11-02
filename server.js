@@ -63,14 +63,14 @@ const parseAllowedApps = (apps) => {
   return parsed;
 };
 
-// 🛡️ تابع استانداردساز نقش‌ها (برای جلوگیری از تداخل فارسی و انگلیسی)
+// 🛡️ تابع استانداردساز نقش‌ها
 const normalizeRole = (role) => {
   if (!role) return 'clerk';
   const r = role.toString().trim().toLowerCase();
   if (r === 'admin' || r === 'super_admin' || r === 'مدیر کل') return 'admin';
   if (r === 'financial_manager' || r === 'مدیر مالی') return 'financial_manager';
   if (r === 'clerk' || r === 'تنخواه گردان' || r === 'تنخواه‌گردان' || r === 'workshop_manager') return 'clerk';
-  return 'clerk'; // پیش‌فرض
+  return 'clerk';
 };
 
 app.get('/', (req, res) => res.send('HighFit Backend is running perfectly!'));
@@ -92,7 +92,7 @@ app.get('/api/force-create-admin', async (req, res) => {
   } catch (err) { res.status(500).send(err.message); }
 });
 
-// ورود (با استانداردسازی نقش‌ها)
+// ورود (با تنظیم نقش بر اساس اپلیکیشن)
 app.post('/api/login', async (req, res) => {
   const { email, password, app_name } = req.body;
   try {
@@ -102,17 +102,22 @@ app.post('/api/login', async (req, res) => {
     if (!(await bcrypt.compare(password, u.password_hash))) return res.status(401).json({ error: 'Invalid' });
     
     const allowedApps = parseAllowedApps(u.allowed_apps);
+    const finalRole = normalizeRole(u.role);
     
     // بررسی دسترسی
-    if (app_name && u.role !== 'admin' && u.role !== 'super_admin' && !allowedApps.includes(app_name)) {
+    if (app_name && finalRole !== 'admin' && !allowedApps.includes(app_name)) {
       return res.status(403).json({ error: 'No access' });
     }
     
-    // تبدیل هر نقشی به استاندارد انگلیسی
-    const finalRole = normalizeRole(u.role);
+    // تبدیل نقش بر اساس اپلیکیشن (برای جلوگیری از خطای دوختیار)
+    let responseRole = finalRole;
+    if (app_name === 'doakhtyar') {
+      if (finalRole === 'financial_manager') responseRole = 'supervisor';
+      if (finalRole === 'clerk') responseRole = 'workshop_manager';
+    }
 
-    const token = jwt.sign({ id: u.id, role: finalRole, workshop_id: u.workshop_id }, process.env.JWT_SECRET || 'super-secret-key', { expiresIn: '1d' });
-    res.json({ token, user: { id: u.id, username: u.username, email: u.email, role: finalRole, workshop_id: u.workshop_id, allowed_apps: allowedApps } });
+    const token = jwt.sign({ id: u.id, role: responseRole, workshop_id: u.workshop_id }, process.env.JWT_SECRET || 'super-secret-key', { expiresIn: '1d' });
+    res.json({ token, user: { id: u.id, username: u.username, email: u.email, role: responseRole, workshop_id: u.workshop_id, allowed_apps: allowedApps } });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
