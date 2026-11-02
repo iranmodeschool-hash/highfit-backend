@@ -41,7 +41,6 @@ const createTables = async () => {
     `);
     await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS app_name VARCHAR(50) NOT NULL DEFAULT 'doakhtyar';`);
     
-    // 🚀 حذف محدودیت‌های یکتایی قبلی (که اجازه تکرار نام کاربری در اپ‌های مختلف را نمی‌دادند)
     await pool.query(`
       DO $$ BEGIN
         ALTER TABLE users DROP CONSTRAINT IF EXISTS users_email_key;
@@ -49,7 +48,6 @@ const createTables = async () => {
       EXCEPTION WHEN OTHERS THEN NULL; END $$;
     `);
     
-    // 🚀 ایجاد محدودیت‌های یکتایی جدید بر اساس (اپ + ایمیل) و (اپ + نام کاربری)
     await pool.query(`
       DO $$ BEGIN
         ALTER TABLE users ADD CONSTRAINT users_app_email_key UNIQUE (app_name, email);
@@ -61,7 +59,6 @@ const createTables = async () => {
       EXCEPTION WHEN OTHERS THEN NULL; END $$;
     `);
     
-    // 🚀 مهاجرت کاربران قدیمی به تنخواه‌یار (بدون آسیب به داده‌های دوختیار)
     await pool.query(`
       INSERT INTO users (username, email, password_hash, role, workshop_id, allowed_apps, app_name, created_at)
       SELECT username, email, password_hash, role, workshop_id, allowed_apps, 'petty_cash', created_at
@@ -123,33 +120,16 @@ const toPettyCashRole = (dbRole) => {
 
 app.get('/', (req, res) => res.send('HighFit Backend is running perfectly!'));
 
-// 🚀 راه‌اندازی ادمین اولیه برای هر سه اپ
+// 🚀 راه‌اندازی ادمین اولیه
 app.get('/api/force-create-admin', async (req, res) => {
   const { email, password } = req.query;
   try {
     const hashed = await bcrypt.hash(password, 10);
     const appsList = JSON.stringify(["doakhtyar","petty_cash","size_negar"]);
     
-    // دوختیار
-    await pool.query(`
-      INSERT INTO users (username, email, password_hash, role, app_name, allowed_apps) 
-      VALUES ($1,$2,$3,$4,$5,$6) 
-      ON CONFLICT (app_name, email) DO UPDATE SET password_hash = EXCLUDED.password_hash, role = 'admin'
-    `, ['HAMID', email, hashed, 'admin', 'doakhtyar', appsList]);
-
-    // تنخواه‌یار
-    await pool.query(`
-      INSERT INTO users (username, email, password_hash, role, app_name, allowed_apps) 
-      VALUES ($1,$2,$3,$4,$5,$6) 
-      ON CONFLICT (app_name, email) DO UPDATE SET password_hash = EXCLUDED.password_hash, role = 'admin'
-    `, ['HAMID', email, hashed, 'admin', 'petty_cash', appsList]);
-
-    // سایز نگار
-    await pool.query(`
-      INSERT INTO users (username, email, password_hash, role, app_name, allowed_apps) 
-      VALUES ($1,$2,$3,$4,$5,$6) 
-      ON CONFLICT (app_name, email) DO UPDATE SET password_hash = EXCLUDED.password_hash, role = 'admin'
-    `, ['HAMID', email, hashed, 'admin', 'size_negar', appsList]);
+    await pool.query(`INSERT INTO users (username, email, password_hash, role, app_name, allowed_apps) VALUES ($1,$2,$3,$4,$5,$6) ON CONFLICT (app_name, email) DO UPDATE SET password_hash = EXCLUDED.password_hash, role = 'admin'`, ['HAMID', email, hashed, 'admin', 'doakhtyar', appsList]);
+    await pool.query(`INSERT INTO users (username, email, password_hash, role, app_name, allowed_apps) VALUES ($1,$2,$3,$4,$5,$6) ON CONFLICT (app_name, email) DO UPDATE SET password_hash = EXCLUDED.password_hash, role = 'admin'`, ['HAMID', email, hashed, 'admin', 'petty_cash', appsList]);
+    await pool.query(`INSERT INTO users (username, email, password_hash, role, app_name, allowed_apps) VALUES ($1,$2,$3,$4,$5,$6) ON CONFLICT (app_name, email) DO UPDATE SET password_hash = EXCLUDED.password_hash, role = 'admin'`, ['HAMID', email, hashed, 'admin', 'size_negar', appsList]);
 
     res.send('Admin accounts created/reset for all 3 apps.');
   } catch (err) { res.status(500).send(err.message); }
@@ -159,11 +139,9 @@ app.get('/api/force-create-admin', async (req, res) => {
 app.post('/api/login', async (req, res) => {
   const { email, password, app_name } = req.body;
   const targetApp = app_name || 'doakhtyar';
-  
   try {
     const r = await pool.query('SELECT * FROM users WHERE email=$1 AND app_name=$2', [email, targetApp]);
     if (!r.rows.length) return res.status(401).json({ error: 'Invalid credentials for this app' });
-    
     const u = r.rows[0];
     if (!(await bcrypt.compare(password, u.password_hash))) return res.status(401).json({ error: 'Invalid' });
     
@@ -193,13 +171,9 @@ app.post('/api/admin/users', auth, async (req, res) => {
     const hashed = await bcrypt.hash(password, 10);
     const apps = parseAllowedApps(allowed_apps).length ? parseAllowedApps(allowed_apps) : ["doakhtyar"];
     const dbRole = toDbRole(role);
-    const r = await pool.query('INSERT INTO users (username, email, password_hash, role, workshop_id, allowed_apps, app_name) VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING id, username, email, role, workshop_id, allowed_apps', 
-      [username, email, hashed, dbRole, workshop_id || null, JSON.stringify(apps), 'doakhtyar']);
+    const r = await pool.query('INSERT INTO users (username, email, password_hash, role, workshop_id, allowed_apps, app_name) VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING id, username, email, role, workshop_id, allowed_apps', [username, email, hashed, dbRole, workshop_id || null, JSON.stringify(apps), 'doakhtyar']);
     res.status(201).json({ ...r.rows[0], role: toDoakhtyarRole(r.rows[0].role), allowed_apps: apps });
-  } catch (err) { 
-    if (err.code === '23505') return res.status(400).json({ error: 'این ایمیل یا نام کاربری قبلا در دوختیار ثبت شده است.' });
-    res.status(500).json({ error: err.message }); 
-  }
+  } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
 app.put('/api/admin/users/:id/role', auth, async (req, res) => {
@@ -219,24 +193,14 @@ app.put('/api/admin/users/:id', auth, async (req, res) => {
     const existing = await pool.query('SELECT * FROM users WHERE id=$1 AND app_name=$2', [req.params.id, 'doakhtyar']);
     if (!existing.rows.length) return res.status(404).json({ error: 'User not found' });
     const u = existing.rows[0];
-
     const finalUsername = username !== undefined ? username : u.username;
     const finalEmail = email !== undefined ? email : u.email;
     const dbRole = role !== undefined ? toDbRole(role) : u.role;
     const finalWorkshopId = workshop_id !== undefined ? workshop_id : u.workshop_id;
     const finalApps = allowed_apps !== undefined ? JSON.stringify(parseAllowedApps(allowed_apps)) : u.allowed_apps;
-
-    await pool.query('UPDATE users SET username=$1, email=$2, role=$3, workshop_id=$4, allowed_apps=$5 WHERE id=$6 AND app_name=$7', 
-      [finalUsername, finalEmail, dbRole, finalWorkshopId, finalApps, req.params.id, 'doakhtyar']);
+    await pool.query('UPDATE users SET username=$1, email=$2, role=$3, workshop_id=$4, allowed_apps=$5 WHERE id=$6 AND app_name=$7', [finalUsername, finalEmail, dbRole, finalWorkshopId, finalApps, req.params.id, 'doakhtyar']);
     res.json({ message: 'Updated' });
   } catch (err) { res.status(500).json({ error: err.message }); }
-});
-
-app.put('/api/admin/users/:id/password', auth, async (req, res) => {
-  if (req.user.role !== 'admin' && req.user.role !== 'super_admin') return res.status(403).json({ error: 'Admin only' });
-  const hashed = await bcrypt.hash(req.body.newPassword, 10);
-  await pool.query('UPDATE users SET password_hash=$1 WHERE id=$2 AND app_name=$3', [hashed, req.params.id, 'doakhtyar']);
-  res.json({ message: 'Updated' });
 });
 
 app.delete('/api/admin/users/:id', auth, async (req, res) => {
@@ -261,13 +225,9 @@ app.post('/api/users', auth, async (req, res) => {
     const hashed = await bcrypt.hash(password, 10);
     const apps = parseAllowedApps(allowed_apps).length ? parseAllowedApps(allowed_apps) : ["doakhtyar", "petty_cash", "size_negar"];
     const dbRole = toDbRole(role);
-    const r = await pool.query('INSERT INTO users (username, email, password_hash, role, workshop_id, allowed_apps, app_name) VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING id, username, email, role, allowed_apps', 
-      [username || email.split('@')[0], email, hashed, dbRole, workshop_id || null, JSON.stringify(apps), 'petty_cash']);
+    const r = await pool.query('INSERT INTO users (username, email, password_hash, role, workshop_id, allowed_apps, app_name) VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING id, username, email, role, allowed_apps', [username || email.split('@')[0], email, hashed, dbRole, workshop_id || null, JSON.stringify(apps), 'petty_cash']);
     res.status(201).json({ ...r.rows[0], role: toPettyCashRole(r.rows[0].role), allowed_apps: apps });
-  } catch (err) { 
-    if (err.code === '23505') return res.status(400).json({ error: 'این ایمیل یا نام کاربری قبلا در تنخواه‌یار ثبت شده است.' });
-    res.status(500).json({ error: err.message }); 
-  }
+  } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
 app.put('/api/users/:id/role', auth, async (req, res) => {
@@ -287,20 +247,16 @@ app.put('/api/users/:id', auth, async (req, res) => {
     const existing = await pool.query('SELECT * FROM users WHERE id=$1 AND app_name=$2', [req.params.id, 'petty_cash']);
     if (!existing.rows.length) return res.status(404).json({ error: 'User not found' });
     const u = existing.rows[0];
-
     const finalUsername = username !== undefined ? username : u.username;
     const finalEmail = email !== undefined ? email : u.email;
     const dbRole = role !== undefined ? toDbRole(role) : u.role;
     const finalWorkshopId = workshop_id !== undefined ? workshop_id : u.workshop_id;
     const finalApps = allowed_apps !== undefined ? JSON.stringify(parseAllowedApps(allowed_apps)) : u.allowed_apps;
-    
     if (password && password.trim() !== '') {
       const hashed = await bcrypt.hash(password, 10);
-      await pool.query('UPDATE users SET username=$1, email=$2, role=$3, workshop_id=$4, allowed_apps=$5, password_hash=$6 WHERE id=$7 AND app_name=$8', 
-        [finalUsername, finalEmail, dbRole, finalWorkshopId, finalApps, hashed, req.params.id, 'petty_cash']);
+      await pool.query('UPDATE users SET username=$1, email=$2, role=$3, workshop_id=$4, allowed_apps=$5, password_hash=$6 WHERE id=$7 AND app_name=$8', [finalUsername, finalEmail, dbRole, finalWorkshopId, finalApps, hashed, req.params.id, 'petty_cash']);
     } else {
-      await pool.query('UPDATE users SET username=$1, email=$2, role=$3, workshop_id=$4, allowed_apps=$5 WHERE id=$6 AND app_name=$7', 
-        [finalUsername, finalEmail, dbRole, finalWorkshopId, finalApps, req.params.id, 'petty_cash']);
+      await pool.query('UPDATE users SET username=$1, email=$2, role=$3, workshop_id=$4, allowed_apps=$5 WHERE id=$6 AND app_name=$7', [finalUsername, finalEmail, dbRole, finalWorkshopId, finalApps, req.params.id, 'petty_cash']);
     }
     res.json({ message: 'Updated' });
   } catch (err) { res.status(500).json({ error: err.message }); }
@@ -314,7 +270,65 @@ app.delete('/api/users/:id', auth, async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// ===== Store عمومی (شامل سایز نگار) =====
+// ===== مدیریت کاربران (سایز نگار) =====
+app.get('/api/size-negar/users', auth, async (req, res) => {
+  if (req.user.role !== 'admin' && req.user.role !== 'super_admin') return res.status(403).json({ error: 'Admin only' });
+  try {
+    const r = await pool.query('SELECT id, username, email, role, workshop_id, allowed_apps, created_at FROM users WHERE app_name = $1 ORDER BY id DESC', ['size_negar']);
+    res.json(r.rows.map(u => ({ ...u, allowed_apps: parseAllowedApps(u.allowed_apps) })));
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.post('/api/size-negar/users', auth, async (req, res) => {
+  if (req.user.role !== 'admin' && req.user.role !== 'super_admin') return res.status(403).json({ error: 'Admin only' });
+  const { username, email, password, role, workshop_id, allowed_apps } = req.body;
+  try {
+    const hashed = await bcrypt.hash(password, 10);
+    const apps = parseAllowedApps(allowed_apps).length ? parseAllowedApps(allowed_apps) : ["size_negar"];
+    const r = await pool.query('INSERT INTO users (username, email, password_hash, role, workshop_id, allowed_apps, app_name) VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING id, username, email, role, allowed_apps', 
+      [username || email.split('@')[0], email, hashed, role || 'measurer', workshop_id || null, JSON.stringify(apps), 'size_negar']);
+    res.status(201).json({ ...r.rows[0], allowed_apps: apps });
+  } catch (err) { 
+    if (err.code === '23505') return res.status(400).json({ error: 'این ایمیل یا نام کاربری قبلا در سایز نگار ثبت شده است.' });
+    res.status(500).json({ error: err.message }); 
+  }
+});
+
+app.put('/api/size-negar/users/:id', auth, async (req, res) => {
+  if (req.user.role !== 'admin' && req.user.role !== 'super_admin') return res.status(403).json({ error: 'Admin only' });
+  const { username, email, role, workshop_id, password, allowed_apps } = req.body;
+  try {
+    const existing = await pool.query('SELECT * FROM users WHERE id=$1 AND app_name=$2', [req.params.id, 'size_negar']);
+    if (!existing.rows.length) return res.status(404).json({ error: 'User not found' });
+    const u = existing.rows[0];
+
+    const finalUsername = username !== undefined ? username : u.username;
+    const finalEmail = email !== undefined ? email : u.email;
+    const finalRole = role !== undefined ? role : u.role; // measurer, supervisor, admin
+    const finalWorkshopId = workshop_id !== undefined ? workshop_id : u.workshop_id;
+    const finalApps = allowed_apps !== undefined ? JSON.stringify(parseAllowedApps(allowed_apps)) : u.allowed_apps;
+    
+    if (password && password.trim() !== '') {
+      const hashed = await bcrypt.hash(password, 10);
+      await pool.query('UPDATE users SET username=$1, email=$2, role=$3, workshop_id=$4, allowed_apps=$5, password_hash=$6 WHERE id=$7 AND app_name=$8', 
+        [finalUsername, finalEmail, finalRole, finalWorkshopId, finalApps, hashed, req.params.id, 'size_negar']);
+    } else {
+      await pool.query('UPDATE users SET username=$1, email=$2, role=$3, workshop_id=$4, allowed_apps=$5 WHERE id=$6 AND app_name=$7', 
+        [finalUsername, finalEmail, finalRole, finalWorkshopId, finalApps, req.params.id, 'size_negar']);
+    }
+    res.json({ message: 'Updated' });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.delete('/api/size-negar/users/:id', auth, async (req, res) => {
+  if (req.user.role !== 'admin' && req.user.role !== 'super_admin') return res.status(403).json({ error: 'Admin only' });
+  try {
+    await pool.query('DELETE FROM users WHERE id=$1 AND app_name=$2', [req.params.id, 'size_negar']);
+    res.json({ message: 'Deleted' });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// ===== Store عمومی =====
 app.get('/api/store/:collection', auth, async (req, res) => {
   try {
     const r = await pool.query('SELECT id, json FROM app_rows WHERE collection=$1', [req.params.collection]);
@@ -401,10 +415,7 @@ app.get('/api/chat/contacts', auth, async (req, res) => {
     let q = 'SELECT id, username, role, workshop_id FROM users WHERE app_name=$1', p = [targetApp]; 
     if (req.user.role !== 'admin' && req.user.role !== 'super_admin') { q += ' AND role=$2'; p.push('admin'); } 
     const r = await pool.query(q, p); 
-    res.json(r.rows.map(u => ({ 
-      ...u, 
-      role: targetApp === 'doakhtyar' ? toDoakhtyarRole(u.role) : toPettyCashRole(u.role) 
-    })));
+    res.json(r.rows.map(u => ({ ...u, role: targetApp === 'doakhtyar' ? toDoakhtyarRole(u.role) : toPettyCashRole(u.role) })));
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
