@@ -13,7 +13,7 @@ const app = express();
 app.use(express.json({ limit: '50mb' }));
 app.use(cors());
 
-// ⚙️ تنظیمات دیتابیس
+// ⚙️ تنظیمات دیتابیس (بهینه‌شده برای پایداری)
 const pool = new Pool({
   host: process.env.DB_HOST || 'localhost',
   port: process.env.DB_PORT || 5432,
@@ -21,7 +21,14 @@ const pool = new Pool({
   password: process.env.DB_PASSWORD,
   database: process.env.DB_NAME || 'highfit-core-db',
   ssl: process.env.DB_HOST ? false : { rejectUnauthorized: false },
-  max: 15, idleTimeoutMillis: 60000, connectionTimeoutMillis: 15000,
+  max: 10, // کاهش تعداد کانکشن‌های همزمان برای جلوگیری از کرش
+  idleTimeoutMillis: 30000, 
+  connectionTimeoutMillis: 10000,
+});
+
+// هندل کردن خطای قطع ارتباط دیتابیس (جلوگیری از کرش سرور)
+pool.on('error', (err) => {
+  console.error('Unexpected error on idle client', err);
 });
 
 const createTables = async () => {
@@ -197,7 +204,6 @@ app.put('/api/admin/users/:id', auth, async (req, res) => {
     const finalEmail = email !== undefined ? email : u.email;
     const dbRole = role !== undefined ? toDbRole(role) : u.role;
     const finalWorkshopId = workshop_id !== undefined ? workshop_id : u.workshop_id;
-    // 🛡️ اصلاح باگ: همیشه به رشته JSON تبدیل شود
     const finalApps = JSON.stringify(parseAllowedApps(allowed_apps !== undefined ? allowed_apps : u.allowed_apps));
     await pool.query('UPDATE users SET username=$1, email=$2, role=$3, workshop_id=$4, allowed_apps=$5 WHERE id=$6 AND app_name=$7', [finalUsername, finalEmail, dbRole, finalWorkshopId, finalApps, req.params.id, 'doakhtyar']);
     res.json({ message: 'Updated' });
@@ -252,7 +258,6 @@ app.put('/api/users/:id', auth, async (req, res) => {
     const finalEmail = email !== undefined ? email : u.email;
     const dbRole = role !== undefined ? toDbRole(role) : u.role;
     const finalWorkshopId = workshop_id !== undefined ? workshop_id : u.workshop_id;
-    // 🛡️ اصلاح باگ: همیشه به رشته JSON تبدیل شود
     const finalApps = JSON.stringify(parseAllowedApps(allowed_apps !== undefined ? allowed_apps : u.allowed_apps));
     if (password && password.trim() !== '') {
       const hashed = await bcrypt.hash(password, 10);
@@ -307,7 +312,6 @@ app.put('/api/size-negar/users/:id', auth, async (req, res) => {
     const finalEmail = email !== undefined ? email : u.email;
     const finalRole = role !== undefined ? role : u.role;
     const finalWorkshopId = workshop_id !== undefined ? workshop_id : u.workshop_id;
-    // 🛡️ اصلاح باگ: همیشه به رشته JSON تبدیل شود
     const finalApps = JSON.stringify(parseAllowedApps(allowed_apps !== undefined ? allowed_apps : u.allowed_apps));
     
     if (password && password.trim() !== '') {
@@ -339,13 +343,17 @@ app.get('/api/store/:collection', auth, async (req, res) => {
 
     // 🛡️ اعمال امنیت: اگر کاربر مسئول سایزگیری بود، فقط داده‌های مدرسه خودش را ببیند
     if (req.user.role === 'measurer' && (collection === 'size_negar_orders' || collection === 'size_negar_students')) {
+      const wid = req.user.workshop_id || 'NONE';
       query += " AND (json->>'school' = $2 OR json->>'workshop_id' = $2)";
-      params.push(req.user.workshop_id);
+      params.push(wid);
     }
 
     const r = await pool.query(query, params);
     res.json(r.rows.map(x => safeParse(x.json, x.id)));
-  } catch (err) { res.status(500).json({ error: err.message }); }
+  } catch (err) { 
+    console.error("GET Store Error:", err);
+    res.status(500).json({ error: err.message }); 
+  }
 });
 
 app.post('/api/store/:collection', auth, async (req, res) => {
@@ -354,9 +362,14 @@ app.post('/api/store/:collection', auth, async (req, res) => {
     const data = req.body;
     if (!data || Object.keys(data).length === 0) return res.status(400).json({ error: 'سند خالی قابل ثبت نیست.' });
     const id = data.id || Date.now().toString();
+    
+    // 🛡️ ارسال مستقیم آبجکت به pg (برای JSONB)
     await pool.query('INSERT INTO app_rows (id, collection, json) VALUES ($1,$2,$3) ON CONFLICT (id) DO UPDATE SET json=EXCLUDED.json', [id, collection, data]);
     res.json({ message: 'Saved', id });
-  } catch (err) { res.status(500).json({ error: err.message }); }
+  } catch (err) { 
+    console.error("POST Store Error:", err);
+    res.status(500).json({ error: err.message }); 
+  }
 });
 
 app.delete('/api/store/:collection/:id', auth, async (req, res) => {
