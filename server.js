@@ -51,7 +51,7 @@ const createTables = async () => {
       EXCEPTION WHEN OTHERS THEN NULL; END $$;
     `);
     
-    // 🚀 مهاجرت کاربران قدیمی به تنخواه‌یار
+    // 🚀 مهاجرت کاربران قدیمی به تنخواه‌یار (بدون آسیب به داده‌های دوختیار)
     await pool.query(`
       INSERT INTO users (username, email, password_hash, role, workshop_id, allowed_apps, app_name, created_at)
       SELECT username, email, password_hash, role, workshop_id, allowed_apps, 'petty_cash', created_at
