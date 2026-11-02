@@ -197,7 +197,8 @@ app.put('/api/admin/users/:id', auth, async (req, res) => {
     const finalEmail = email !== undefined ? email : u.email;
     const dbRole = role !== undefined ? toDbRole(role) : u.role;
     const finalWorkshopId = workshop_id !== undefined ? workshop_id : u.workshop_id;
-    const finalApps = allowed_apps !== undefined ? JSON.stringify(parseAllowedApps(allowed_apps)) : u.allowed_apps;
+    // 🛡️ اصلاح باگ: همیشه به رشته JSON تبدیل شود
+    const finalApps = JSON.stringify(parseAllowedApps(allowed_apps !== undefined ? allowed_apps : u.allowed_apps));
     await pool.query('UPDATE users SET username=$1, email=$2, role=$3, workshop_id=$4, allowed_apps=$5 WHERE id=$6 AND app_name=$7', [finalUsername, finalEmail, dbRole, finalWorkshopId, finalApps, req.params.id, 'doakhtyar']);
     res.json({ message: 'Updated' });
   } catch (err) { res.status(500).json({ error: err.message }); }
@@ -251,7 +252,8 @@ app.put('/api/users/:id', auth, async (req, res) => {
     const finalEmail = email !== undefined ? email : u.email;
     const dbRole = role !== undefined ? toDbRole(role) : u.role;
     const finalWorkshopId = workshop_id !== undefined ? workshop_id : u.workshop_id;
-    const finalApps = allowed_apps !== undefined ? JSON.stringify(parseAllowedApps(allowed_apps)) : u.allowed_apps;
+    // 🛡️ اصلاح باگ: همیشه به رشته JSON تبدیل شود
+    const finalApps = JSON.stringify(parseAllowedApps(allowed_apps !== undefined ? allowed_apps : u.allowed_apps));
     if (password && password.trim() !== '') {
       const hashed = await bcrypt.hash(password, 10);
       await pool.query('UPDATE users SET username=$1, email=$2, role=$3, workshop_id=$4, allowed_apps=$5, password_hash=$6 WHERE id=$7 AND app_name=$8', [finalUsername, finalEmail, dbRole, finalWorkshopId, finalApps, hashed, req.params.id, 'petty_cash']);
@@ -305,7 +307,8 @@ app.put('/api/size-negar/users/:id', auth, async (req, res) => {
     const finalEmail = email !== undefined ? email : u.email;
     const finalRole = role !== undefined ? role : u.role;
     const finalWorkshopId = workshop_id !== undefined ? workshop_id : u.workshop_id;
-    const finalApps = allowed_apps !== undefined ? JSON.stringify(parseAllowedApps(allowed_apps)) : u.allowed_apps;
+    // 🛡️ اصلاح باگ: همیشه به رشته JSON تبدیل شود
+    const finalApps = JSON.stringify(parseAllowedApps(allowed_apps !== undefined ? allowed_apps : u.allowed_apps));
     
     if (password && password.trim() !== '') {
       const hashed = await bcrypt.hash(password, 10);
