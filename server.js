@@ -40,14 +40,24 @@ const createTables = async () => {
       );
     `);
     await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS app_name VARCHAR(50) NOT NULL DEFAULT 'doakhtyar';`);
+    
+    // 🚀 حذف محدودیت‌های یکتایی قبلی (که اجازه تکرار نام کاربری در اپ‌های مختلف را نمی‌دادند)
     await pool.query(`
       DO $$ BEGIN
         ALTER TABLE users DROP CONSTRAINT IF EXISTS users_email_key;
+        ALTER TABLE users DROP CONSTRAINT IF EXISTS users_username_key;
+      EXCEPTION WHEN OTHERS THEN NULL; END $$;
+    `);
+    
+    // 🚀 ایجاد محدودیت‌های یکتایی جدید بر اساس (اپ + ایمیل) و (اپ + نام کاربری)
+    await pool.query(`
+      DO $$ BEGIN
+        ALTER TABLE users ADD CONSTRAINT users_app_email_key UNIQUE (app_name, email);
       EXCEPTION WHEN OTHERS THEN NULL; END $$;
     `);
     await pool.query(`
       DO $$ BEGIN
-        ALTER TABLE users ADD CONSTRAINT users_app_email_key UNIQUE (app_name, email);
+        ALTER TABLE users ADD CONSTRAINT users_app_username_key UNIQUE (app_name, username);
       EXCEPTION WHEN OTHERS THEN NULL; END $$;
     `);
     
@@ -160,7 +170,7 @@ app.post('/api/login', async (req, res) => {
     let responseRole = u.role;
     if (targetApp === 'doakhtyar') responseRole = toDoakhtyarRole(u.role);
     if (targetApp === 'petty_cash') responseRole = toPettyCashRole(u.role);
-    if (targetApp === 'size_negar') responseRole = u.role; // سایز نگار فعلا نقش خام را می‌گیرد
+    if (targetApp === 'size_negar') responseRole = u.role;
 
     const token = jwt.sign({ id: u.id, role: responseRole, workshop_id: u.workshop_id, app_name: targetApp }, process.env.JWT_SECRET || 'super-secret-key', { expiresIn: '1d' });
     res.json({ token, user: { id: u.id, username: u.username, email: u.email, role: responseRole, workshop_id: u.workshop_id, allowed_apps: parseAllowedApps(u.allowed_apps) } });
@@ -187,7 +197,7 @@ app.post('/api/admin/users', auth, async (req, res) => {
       [username, email, hashed, dbRole, workshop_id || null, JSON.stringify(apps), 'doakhtyar']);
     res.status(201).json({ ...r.rows[0], role: toDoakhtyarRole(r.rows[0].role), allowed_apps: apps });
   } catch (err) { 
-    if (err.code === '23505') return res.status(400).json({ error: 'این ایمیل قبلا در دوختیار ثبت شده است.' });
+    if (err.code === '23505') return res.status(400).json({ error: 'این ایمیل یا نام کاربری قبلا در دوختیار ثبت شده است.' });
     res.status(500).json({ error: err.message }); 
   }
 });
@@ -255,7 +265,7 @@ app.post('/api/users', auth, async (req, res) => {
       [username || email.split('@')[0], email, hashed, dbRole, workshop_id || null, JSON.stringify(apps), 'petty_cash']);
     res.status(201).json({ ...r.rows[0], role: toPettyCashRole(r.rows[0].role), allowed_apps: apps });
   } catch (err) { 
-    if (err.code === '23505') return res.status(400).json({ error: 'این ایمیل قبلا در تنخواه‌یار ثبت شده است.' });
+    if (err.code === '23505') return res.status(400).json({ error: 'این ایمیل یا نام کاربری قبلا در تنخواه‌یار ثبت شده است.' });
     res.status(500).json({ error: err.message }); 
   }
 });
