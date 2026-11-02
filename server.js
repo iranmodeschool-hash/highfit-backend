@@ -50,8 +50,17 @@ const createTables = async () => {
         ALTER TABLE users ADD CONSTRAINT users_app_email_key UNIQUE (app_name, email);
       EXCEPTION WHEN OTHERS THEN NULL; END $$;
     `);
+    
+    // 🚀 مهاجرت کاربران قدیمی به تنخواه‌یار (تا لیست تنخواه‌یار خالی نباشد)
+    await pool.query(`
+      INSERT INTO users (username, email, password_hash, role, workshop_id, allowed_apps, app_name, created_at)
+      SELECT username, email, password_hash, role, workshop_id, allowed_apps, 'petty_cash', created_at
+      FROM users WHERE app_name = 'doakhtyar'
+      ON CONFLICT (app_name, email) DO NOTHING;
+    `);
+
     await pool.query(`CREATE TABLE IF NOT EXISTS app_rows (id VARCHAR(100) PRIMARY KEY, collection VARCHAR(50) NOT NULL, json JSONB NOT NULL, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP);`);
-    console.log("Tables ready & Migrated for Multi-Tenancy");
+    console.log("Tables ready & Migrated successfully");
   } catch (err) { console.error("Error:", err); }
 };
 createTables();
@@ -78,7 +87,7 @@ const parseAllowedApps = (apps) => {
   return Array.isArray(parsed) ? parsed : [];
 };
 
-// 🛡️ توابع نگاشت نقش‌ها (برای هماهنگی بین دو اپ)
+// 🛡️ توابع نگاشت نقش‌ها
 const toDbRole = (role) => {
   if (!role) return 'clerk';
   const r = role.toString().trim().toLowerCase();
@@ -169,7 +178,6 @@ app.post('/api/admin/users', auth, async (req, res) => {
   }
 });
 
-// مسیر اختصاصی تغییر نقش برای دوختیار (رفع خطای Cannot PUT)
 app.put('/api/admin/users/:id/role', auth, async (req, res) => {
   if (req.user.role !== 'admin' && req.user.role !== 'super_admin') return res.status(403).json({ error: 'Admin only' });
   const { role } = req.body;
@@ -184,11 +192,19 @@ app.put('/api/admin/users/:id', auth, async (req, res) => {
   if (req.user.role !== 'admin' && req.user.role !== 'super_admin') return res.status(403).json({ error: 'Admin only' });
   const { username, email, role, workshop_id, allowed_apps } = req.body;
   try {
-    const apps = parseAllowedApps(allowed_apps).length ? parseAllowedApps(allowed_apps) : ["doakhtyar"];
-    const dbRole = toDbRole(role);
-    const r = await pool.query('UPDATE users SET username=$1, email=$2, role=$3, workshop_id=$4, allowed_apps=$5 WHERE id=$6 AND app_name=$7 RETURNING id, username, email, role, workshop_id, allowed_apps', 
-      [username, email, dbRole, workshop_id || null, JSON.stringify(apps), req.params.id, 'doakhtyar']);
-    res.json({ ...r.rows[0], role: toDoakhtyarRole(r.rows[0].role), allowed_apps: apps });
+    const existing = await pool.query('SELECT * FROM users WHERE id=$1 AND app_name=$2', [req.params.id, 'doakhtyar']);
+    if (!existing.rows.length) return res.status(404).json({ error: 'User not found' });
+    const u = existing.rows[0];
+
+    const finalUsername = username !== undefined ? username : u.username;
+    const finalEmail = email !== undefined ? email : u.email;
+    const dbRole = role !== undefined ? toDbRole(role) : u.role;
+    const finalWorkshopId = workshop_id !== undefined ? workshop_id : u.workshop_id;
+    const finalApps = allowed_apps !== undefined ? JSON.stringify(parseAllowedApps(allowed_apps)) : u.allowed_apps;
+
+    await pool.query('UPDATE users SET username=$1, email=$2, role=$3, workshop_id=$4, allowed_apps=$5 WHERE id=$6 AND app_name=$7', 
+      [finalUsername, finalEmail, dbRole, finalWorkshopId, finalApps, req.params.id, 'doakhtyar']);
+    res.json({ message: 'Updated' });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
@@ -230,7 +246,6 @@ app.post('/api/users', auth, async (req, res) => {
   }
 });
 
-// مسیر اختصاصی تغییر نقش برای تنخواه‌یار
 app.put('/api/users/:id/role', auth, async (req, res) => {
   if (req.user.role !== 'admin' && req.user.role !== 'super_admin') return res.status(403).json({ error: 'Admin only' });
   const { role } = req.body;
@@ -245,16 +260,24 @@ app.put('/api/users/:id', auth, async (req, res) => {
   if (req.user.role !== 'admin' && req.user.role !== 'super_admin') return res.status(403).json({ error: 'Admin only' });
   const { username, email, role, workshop_id, password, allowed_apps } = req.body;
   try {
-    const apps = parseAllowedApps(allowed_apps).length ? parseAllowedApps(allowed_apps) : ["doakhtyar", "petty_cash"];
-    const dbRole = toDbRole(role);
+    // دریافت اطلاعات فعلی برای جلوگیری از خالی شدن فیلدها
+    const existing = await pool.query('SELECT * FROM users WHERE id=$1 AND app_name=$2', [req.params.id, 'petty_cash']);
+    if (!existing.rows.length) return res.status(404).json({ error: 'User not found' });
+    const u = existing.rows[0];
+
+    const finalUsername = username !== undefined ? username : u.username;
+    const finalEmail = email !== undefined ? email : u.email;
+    const dbRole = role !== undefined ? toDbRole(role) : u.role;
+    const finalWorkshopId = workshop_id !== undefined ? workshop_id : u.workshop_id;
+    const finalApps = allowed_apps !== undefined ? JSON.stringify(parseAllowedApps(allowed_apps)) : u.allowed_apps;
     
     if (password && password.trim() !== '') {
       const hashed = await bcrypt.hash(password, 10);
       await pool.query('UPDATE users SET username=$1, email=$2, role=$3, workshop_id=$4, allowed_apps=$5, password_hash=$6 WHERE id=$7 AND app_name=$8', 
-        [username, email, dbRole, workshop_id || null, JSON.stringify(apps), hashed, req.params.id, 'petty_cash']);
+        [finalUsername, finalEmail, dbRole, finalWorkshopId, finalApps, hashed, req.params.id, 'petty_cash']);
     } else {
       await pool.query('UPDATE users SET username=$1, email=$2, role=$3, workshop_id=$4, allowed_apps=$5 WHERE id=$6 AND app_name=$7', 
-        [username, email, dbRole, workshop_id || null, JSON.stringify(apps), req.params.id, 'petty_cash']);
+        [finalUsername, finalEmail, dbRole, finalWorkshopId, finalApps, req.params.id, 'petty_cash']);
     }
     res.json({ message: 'Updated' });
   } catch (err) { res.status(500).json({ error: err.message }); }
