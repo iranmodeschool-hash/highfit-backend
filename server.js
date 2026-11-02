@@ -51,7 +51,7 @@ const createTables = async () => {
       EXCEPTION WHEN OTHERS THEN NULL; END $$;
     `);
     
-    // 🚀 مهاجرت کاربران قدیمی به تنخواه‌یار (تا لیست تنخواه‌یار خالی نباشد)
+    // 🚀 مهاجرت کاربران قدیمی به تنخواه‌یار
     await pool.query(`
       INSERT INTO users (username, email, password_hash, role, workshop_id, allowed_apps, app_name, created_at)
       SELECT username, email, password_hash, role, workshop_id, allowed_apps, 'petty_cash', created_at
@@ -113,22 +113,35 @@ const toPettyCashRole = (dbRole) => {
 
 app.get('/', (req, res) => res.send('HighFit Backend is running perfectly!'));
 
-// 🚀 راه‌اندازی ادمین اولیه
+// 🚀 راه‌اندازی ادمین اولیه برای هر سه اپ
 app.get('/api/force-create-admin', async (req, res) => {
   const { email, password } = req.query;
   try {
     const hashed = await bcrypt.hash(password, 10);
+    const appsList = JSON.stringify(["doakhtyar","petty_cash","size_negar"]);
+    
+    // دوختیار
     await pool.query(`
       INSERT INTO users (username, email, password_hash, role, app_name, allowed_apps) 
       VALUES ($1,$2,$3,$4,$5,$6) 
       ON CONFLICT (app_name, email) DO UPDATE SET password_hash = EXCLUDED.password_hash, role = 'admin'
-    `, ['HAMID', email, hashed, 'admin', 'doakhtyar', JSON.stringify(["doakhtyar","petty_cash"])]);
+    `, ['HAMID', email, hashed, 'admin', 'doakhtyar', appsList]);
+
+    // تنخواه‌یار
     await pool.query(`
       INSERT INTO users (username, email, password_hash, role, app_name, allowed_apps) 
       VALUES ($1,$2,$3,$4,$5,$6) 
       ON CONFLICT (app_name, email) DO UPDATE SET password_hash = EXCLUDED.password_hash, role = 'admin'
-    `, ['HAMID', email, hashed, 'admin', 'petty_cash', JSON.stringify(["doakhtyar","petty_cash"])]);
-    res.send('Admin accounts created/reset for both apps.');
+    `, ['HAMID', email, hashed, 'admin', 'petty_cash', appsList]);
+
+    // سایز نگار
+    await pool.query(`
+      INSERT INTO users (username, email, password_hash, role, app_name, allowed_apps) 
+      VALUES ($1,$2,$3,$4,$5,$6) 
+      ON CONFLICT (app_name, email) DO UPDATE SET password_hash = EXCLUDED.password_hash, role = 'admin'
+    `, ['HAMID', email, hashed, 'admin', 'size_negar', appsList]);
+
+    res.send('Admin accounts created/reset for all 3 apps.');
   } catch (err) { res.status(500).send(err.message); }
 });
 
@@ -147,6 +160,7 @@ app.post('/api/login', async (req, res) => {
     let responseRole = u.role;
     if (targetApp === 'doakhtyar') responseRole = toDoakhtyarRole(u.role);
     if (targetApp === 'petty_cash') responseRole = toPettyCashRole(u.role);
+    if (targetApp === 'size_negar') responseRole = u.role; // سایز نگار فعلا نقش خام را می‌گیرد
 
     const token = jwt.sign({ id: u.id, role: responseRole, workshop_id: u.workshop_id, app_name: targetApp }, process.env.JWT_SECRET || 'super-secret-key', { expiresIn: '1d' });
     res.json({ token, user: { id: u.id, username: u.username, email: u.email, role: responseRole, workshop_id: u.workshop_id, allowed_apps: parseAllowedApps(u.allowed_apps) } });
@@ -235,7 +249,7 @@ app.post('/api/users', auth, async (req, res) => {
   const { username, email, password, role, workshop_id, allowed_apps } = req.body;
   try {
     const hashed = await bcrypt.hash(password, 10);
-    const apps = parseAllowedApps(allowed_apps).length ? parseAllowedApps(allowed_apps) : ["doakhtyar", "petty_cash"];
+    const apps = parseAllowedApps(allowed_apps).length ? parseAllowedApps(allowed_apps) : ["doakhtyar", "petty_cash", "size_negar"];
     const dbRole = toDbRole(role);
     const r = await pool.query('INSERT INTO users (username, email, password_hash, role, workshop_id, allowed_apps, app_name) VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING id, username, email, role, allowed_apps', 
       [username || email.split('@')[0], email, hashed, dbRole, workshop_id || null, JSON.stringify(apps), 'petty_cash']);
@@ -260,7 +274,6 @@ app.put('/api/users/:id', auth, async (req, res) => {
   if (req.user.role !== 'admin' && req.user.role !== 'super_admin') return res.status(403).json({ error: 'Admin only' });
   const { username, email, role, workshop_id, password, allowed_apps } = req.body;
   try {
-    // دریافت اطلاعات فعلی برای جلوگیری از خالی شدن فیلدها
     const existing = await pool.query('SELECT * FROM users WHERE id=$1 AND app_name=$2', [req.params.id, 'petty_cash']);
     if (!existing.rows.length) return res.status(404).json({ error: 'User not found' });
     const u = existing.rows[0];
@@ -291,7 +304,7 @@ app.delete('/api/users/:id', auth, async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// ===== Store عمومی =====
+// ===== Store عمومی (شامل سایز نگار) =====
 app.get('/api/store/:collection', auth, async (req, res) => {
   try {
     const r = await pool.query('SELECT id, json FROM app_rows WHERE collection=$1', [req.params.collection]);
