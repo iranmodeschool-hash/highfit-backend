@@ -301,10 +301,9 @@ app.put('/api/size-negar/users/:id', auth, async (req, res) => {
     const existing = await pool.query('SELECT * FROM users WHERE id=$1 AND app_name=$2', [req.params.id, 'size_negar']);
     if (!existing.rows.length) return res.status(404).json({ error: 'User not found' });
     const u = existing.rows[0];
-
     const finalUsername = username !== undefined ? username : u.username;
     const finalEmail = email !== undefined ? email : u.email;
-    const finalRole = role !== undefined ? role : u.role; // measurer, supervisor, admin
+    const finalRole = role !== undefined ? role : u.role;
     const finalWorkshopId = workshop_id !== undefined ? workshop_id : u.workshop_id;
     const finalApps = allowed_apps !== undefined ? JSON.stringify(parseAllowedApps(allowed_apps)) : u.allowed_apps;
     
@@ -328,10 +327,20 @@ app.delete('/api/size-negar/users/:id', auth, async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// ===== Store عمومی =====
+// ===== Store عمومی با امنیت داده‌های سایز نگار =====
 app.get('/api/store/:collection', auth, async (req, res) => {
   try {
-    const r = await pool.query('SELECT id, json FROM app_rows WHERE collection=$1', [req.params.collection]);
+    const collection = req.params.collection;
+    let query = 'SELECT id, json FROM app_rows WHERE collection=$1';
+    let params = [collection];
+
+    // 🛡️ اعمال امنیت: اگر کاربر مسئول سایزگیری بود، فقط داده‌های مدرسه خودش را ببیند
+    if (req.user.role === 'measurer' && (collection === 'size_negar_orders' || collection === 'size_negar_students')) {
+      query += " AND (json->>'school' = $2 OR json->>'workshop_id' = $2)";
+      params.push(req.user.workshop_id);
+    }
+
+    const r = await pool.query(query, params);
     res.json(r.rows.map(x => safeParse(x.json, x.id)));
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
