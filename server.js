@@ -1,4 +1,3 @@
-
 const express = require('express');
 const { Pool } = require('pg');
 const bcrypt = require('bcryptjs');
@@ -28,7 +27,7 @@ const pool = new Pool({
 
 const createTables = async () => {
   try {
-    await pool.query(`CREATE TABLE IF NOT EXISTS users (id SERIAL PRIMARY KEY, username VARCHAR(50) UNIQUE NOT NULL, email VARCHAR(100) UNIQUE NOT NULL, password_hash VARCHAR(255) NOT NULL, role VARCHAR(30) DEFAULT 'workshop_manager', workshop_id VARCHAR(50), allowed_apps JSONB DEFAULT '["doakhtyar"]'::jsonb, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP);`);
+    await pool.query(`CREATE TABLE IF NOT EXISTS users (id SERIAL PRIMARY KEY, username VARCHAR(50) UNIQUE NOT NULL, email VARCHAR(100) UNIQUE NOT NULL, password_hash VARCHAR(255) NOT NULL, role VARCHAR(30) DEFAULT 'clerk', workshop_id VARCHAR(50), allowed_apps JSONB DEFAULT '["doakhtyar"]'::jsonb, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP);`);
     await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS allowed_apps JSONB DEFAULT '["doakhtyar"]'::jsonb;`);
     await pool.query(`CREATE TABLE IF NOT EXISTS app_rows (id VARCHAR(100) PRIMARY KEY, collection VARCHAR(50) NOT NULL, json JSONB NOT NULL, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP);`);
     console.log("Tables ready");
@@ -44,7 +43,7 @@ const auth = (req, res, next) => {
   catch (err) { res.status(401).json({ error: 'Invalid token' }); }
 };
 
-// 🛡️ تابع امن‌سازی داده‌ها (ضد کرش)
+// 🛡️ تابع امن‌سازی داده‌ها
 const safeParse = (data, dbId) => {
   let obj = data;
   if (typeof obj === 'string') {
@@ -54,7 +53,7 @@ const safeParse = (data, dbId) => {
   return { ...obj, id: obj.id || dbId || Math.random().toString(36).substring(7) };
 };
 
-// 🛡️ تابع امن برای پردازش دسترسی‌ها
+// 🛡️ تابع پردازش دسترسی‌ها
 const parseAllowedApps = (apps) => {
   let parsed = apps;
   if (typeof parsed === 'string') {
@@ -62,6 +61,16 @@ const parseAllowedApps = (apps) => {
   }
   if (!Array.isArray(parsed)) parsed = [];
   return parsed;
+};
+
+// 🛡️ تابع استانداردساز نقش‌ها (برای جلوگیری از تداخل فارسی و انگلیسی)
+const normalizeRole = (role) => {
+  if (!role) return 'clerk';
+  const r = role.toString().trim().toLowerCase();
+  if (r === 'admin' || r === 'super_admin' || r === 'مدیر کل') return 'admin';
+  if (r === 'financial_manager' || r === 'مدیر مالی') return 'financial_manager';
+  if (r === 'clerk' || r === 'تنخواه گردان' || r === 'تنخواه‌گردان' || r === 'workshop_manager') return 'clerk';
+  return 'clerk'; // پیش‌فرض
 };
 
 app.get('/', (req, res) => res.send('HighFit Backend is running perfectly!'));
@@ -83,7 +92,7 @@ app.get('/api/force-create-admin', async (req, res) => {
   } catch (err) { res.status(500).send(err.message); }
 });
 
-// ورود (با اصلاح تداخل نقش‌ها)
+// ورود (با استانداردسازی نقش‌ها)
 app.post('/api/login', async (req, res) => {
   const { email, password, app_name } = req.body;
   try {
@@ -99,11 +108,8 @@ app.post('/api/login', async (req, res) => {
       return res.status(403).json({ error: 'No access' });
     }
     
-    // 🛡️ اصلاح تداخل نقش‌ها: اگر نقش super_admin بود، به admin تبدیل می‌کنیم تا دوختیار خراب نشود
-    let finalRole = u.role;
-    if (finalRole === 'super_admin') {
-      finalRole = 'admin';
-    }
+    // تبدیل هر نقشی به استاندارد انگلیسی
+    const finalRole = normalizeRole(u.role);
 
     const token = jwt.sign({ id: u.id, role: finalRole, workshop_id: u.workshop_id }, process.env.JWT_SECRET || 'super-secret-key', { expiresIn: '1d' });
     res.json({ token, user: { id: u.id, username: u.username, email: u.email, role: finalRole, workshop_id: u.workshop_id, allowed_apps: allowedApps } });
@@ -115,7 +121,7 @@ app.get('/api/admin/users', auth, async (req, res) => {
   if (req.user.role !== 'admin' && req.user.role !== 'super_admin') return res.status(403).json({ error: 'Admin only' });
   try {
     const r = await pool.query('SELECT id, username, email, role, workshop_id, allowed_apps, created_at FROM users ORDER BY id DESC');
-    res.json(r.rows.map(u => ({ ...u, allowed_apps: parseAllowedApps(u.allowed_apps) })));
+    res.json(r.rows.map(u => ({ ...u, role: normalizeRole(u.role), allowed_apps: parseAllowedApps(u.allowed_apps) })));
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
@@ -125,8 +131,10 @@ app.post('/api/admin/users', auth, async (req, res) => {
   try {
     const hashed = await bcrypt.hash(password, 10);
     const apps = parseAllowedApps(allowed_apps).length ? parseAllowedApps(allowed_apps) : ["doakhtyar"];
+    const finalRole = normalizeRole(role);
+    
     const r = await pool.query('INSERT INTO users (username, email, password_hash, role, workshop_id, allowed_apps) VALUES ($1,$2,$3,$4,$5,$6) RETURNING id, username, email, role, workshop_id, allowed_apps', 
-      [username, email, hashed, role || 'workshop_manager', workshop_id || null, JSON.stringify(apps)]);
+      [username, email, hashed, finalRole, workshop_id || null, JSON.stringify(apps)]);
     res.status(201).json({ ...r.rows[0], allowed_apps: apps });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
@@ -136,8 +144,10 @@ app.put('/api/admin/users/:id', auth, async (req, res) => {
   const { username, email, role, workshop_id, allowed_apps } = req.body;
   try {
     const apps = parseAllowedApps(allowed_apps).length ? parseAllowedApps(allowed_apps) : ["doakhtyar"];
+    const finalRole = normalizeRole(role);
+    
     const r = await pool.query('UPDATE users SET username=$1, email=$2, role=$3, workshop_id=$4, allowed_apps=$5 WHERE id=$6 RETURNING id, username, email, role, workshop_id, allowed_apps', 
-      [username, email, role, workshop_id || null, JSON.stringify(apps), req.params.id]);
+      [username, email, finalRole, workshop_id || null, JSON.stringify(apps), req.params.id]);
     res.json({ ...r.rows[0], allowed_apps: apps });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
@@ -160,7 +170,7 @@ app.get('/api/users', auth, async (req, res) => {
   if (req.user.role !== 'admin' && req.user.role !== 'super_admin') return res.status(403).json({ error: 'Admin only' });
   try {
     const r = await pool.query('SELECT id, username, email, role, workshop_id, allowed_apps, created_at FROM users ORDER BY id DESC');
-    res.json(r.rows.map(u => ({ ...u, allowed_apps: parseAllowedApps(u.allowed_apps) })));
+    res.json(r.rows.map(u => ({ ...u, role: normalizeRole(u.role), allowed_apps: parseAllowedApps(u.allowed_apps) })));
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
@@ -170,8 +180,10 @@ app.post('/api/users', auth, async (req, res) => {
   try {
     const hashed = await bcrypt.hash(password, 10);
     const apps = parseAllowedApps(allowed_apps).length ? parseAllowedApps(allowed_apps) : ["doakhtyar", "petty_cash"];
+    const finalRole = normalizeRole(role);
+    
     const r = await pool.query('INSERT INTO users (username, email, password_hash, role, workshop_id, allowed_apps) VALUES ($1,$2,$3,$4,$5,$6) RETURNING id, username, email, role, allowed_apps', 
-      [username || email.split('@')[0], email, hashed, role || 'clerk', workshop_id || null, JSON.stringify(apps)]);
+      [username || email.split('@')[0], email, hashed, finalRole, workshop_id || null, JSON.stringify(apps)]);
     res.status(201).json({ ...r.rows[0], allowed_apps: apps });
   } catch (err) { 
     if (err.code === '23505') return res.status(400).json({ error: 'این ایمیل قبلا ثبت شده است.' });
@@ -184,14 +196,15 @@ app.put('/api/users/:id', auth, async (req, res) => {
   const { username, email, role, workshop_id, password, allowed_apps } = req.body;
   try {
     const apps = parseAllowedApps(allowed_apps).length ? parseAllowedApps(allowed_apps) : ["doakhtyar", "petty_cash"];
+    const finalRole = normalizeRole(role);
     
     if (password && password.trim() !== '') {
       const hashed = await bcrypt.hash(password, 10);
       await pool.query('UPDATE users SET username=$1, email=$2, role=$3, workshop_id=$4, allowed_apps=$5, password_hash=$6 WHERE id=$7', 
-        [username, email, role, workshop_id || null, JSON.stringify(apps), hashed, req.params.id]);
+        [username, email, finalRole, workshop_id || null, JSON.stringify(apps), hashed, req.params.id]);
     } else {
       await pool.query('UPDATE users SET username=$1, email=$2, role=$3, workshop_id=$4, allowed_apps=$5 WHERE id=$6', 
-        [username, email, role, workshop_id || null, JSON.stringify(apps), req.params.id]);
+        [username, email, finalRole, workshop_id || null, JSON.stringify(apps), req.params.id]);
     }
     res.json({ message: 'Updated' });
   } catch (err) { res.status(500).json({ error: err.message }); }
@@ -205,7 +218,7 @@ app.delete('/api/users/:id', auth, async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// ===== Store عمومی (برای همه منوها) =====
+// ===== Store عمومی =====
 app.get('/api/store/:collection', auth, async (req, res) => {
   try {
     const r = await pool.query('SELECT id, json FROM app_rows WHERE collection=$1', [req.params.collection]);
@@ -291,7 +304,7 @@ app.get('/api/chat/contacts', auth, async (req, res) => {
     let q = 'SELECT id, username, role, workshop_id FROM users', p = []; 
     if (req.user.role !== 'admin' && req.user.role !== 'super_admin') { q += ' WHERE role=$1'; p.push('admin'); } 
     const r = await pool.query(q, p); 
-    res.json(r.rows);
+    res.json(r.rows.map(u => ({ ...u, role: normalizeRole(u.role) })));
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
