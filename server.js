@@ -13,7 +13,7 @@ const app = express();
 app.use(express.json({ limit: '50mb' }));
 app.use(cors());
 
-// ⚙️ تنظیمات دیتابیس (بهینه‌شده برای پایداری)
+// ⚙️ تنظیمات دیتابیس
 const pool = new Pool({
   host: process.env.DB_HOST || 'localhost',
   port: process.env.DB_PORT || 5432,
@@ -21,15 +21,10 @@ const pool = new Pool({
   password: process.env.DB_PASSWORD,
   database: process.env.DB_NAME || 'highfit-core-db',
   ssl: process.env.DB_HOST ? false : { rejectUnauthorized: false },
-  max: 10, // کاهش تعداد کانکشن‌های همزمان برای جلوگیری از کرش
-  idleTimeoutMillis: 30000, 
-  connectionTimeoutMillis: 10000,
+  max: 15, idleTimeoutMillis: 60000, connectionTimeoutMillis: 15000,
 });
 
-// هندل کردن خطای قطع ارتباط دیتابیس (جلوگیری از کرش سرور)
-pool.on('error', (err) => {
-  console.error('Unexpected error on idle client', err);
-});
+pool.on('error', (err) => { console.error('Unexpected error on idle client', err); });
 
 const createTables = async () => {
   try {
@@ -47,14 +42,12 @@ const createTables = async () => {
       );
     `);
     await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS app_name VARCHAR(50) NOT NULL DEFAULT 'doakhtyar';`);
-    
     await pool.query(`
       DO $$ BEGIN
         ALTER TABLE users DROP CONSTRAINT IF EXISTS users_email_key;
         ALTER TABLE users DROP CONSTRAINT IF EXISTS users_username_key;
       EXCEPTION WHEN OTHERS THEN NULL; END $$;
     `);
-    
     await pool.query(`
       DO $$ BEGIN
         ALTER TABLE users ADD CONSTRAINT users_app_email_key UNIQUE (app_name, email);
@@ -65,14 +58,12 @@ const createTables = async () => {
         ALTER TABLE users ADD CONSTRAINT users_app_username_key UNIQUE (app_name, username);
       EXCEPTION WHEN OTHERS THEN NULL; END $$;
     `);
-    
     await pool.query(`
       INSERT INTO users (username, email, password_hash, role, workshop_id, allowed_apps, app_name, created_at)
       SELECT username, email, password_hash, role, workshop_id, allowed_apps, 'petty_cash', created_at
       FROM users WHERE app_name = 'doakhtyar'
       ON CONFLICT (app_name, email) DO NOTHING;
     `);
-
     await pool.query(`CREATE TABLE IF NOT EXISTS app_rows (id VARCHAR(100) PRIMARY KEY, collection VARCHAR(50) NOT NULL, json JSONB NOT NULL, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP);`);
     console.log("Tables ready & Migrated successfully");
   } catch (err) { console.error("Error:", err); }
@@ -101,7 +92,6 @@ const parseAllowedApps = (apps) => {
   return Array.isArray(parsed) ? parsed : [];
 };
 
-// 🛡️ توابع نگاشت نقش‌ها
 const toDbRole = (role) => {
   if (!role) return 'clerk';
   const r = role.toString().trim().toLowerCase();
@@ -127,22 +117,18 @@ const toPettyCashRole = (dbRole) => {
 
 app.get('/', (req, res) => res.send('HighFit Backend is running perfectly!'));
 
-// 🚀 راه‌اندازی ادمین اولیه
 app.get('/api/force-create-admin', async (req, res) => {
   const { email, password } = req.query;
   try {
     const hashed = await bcrypt.hash(password, 10);
     const appsList = JSON.stringify(["doakhtyar","petty_cash","size_negar"]);
-    
     await pool.query(`INSERT INTO users (username, email, password_hash, role, app_name, allowed_apps) VALUES ($1,$2,$3,$4,$5,$6) ON CONFLICT (app_name, email) DO UPDATE SET password_hash = EXCLUDED.password_hash, role = 'admin'`, ['HAMID', email, hashed, 'admin', 'doakhtyar', appsList]);
     await pool.query(`INSERT INTO users (username, email, password_hash, role, app_name, allowed_apps) VALUES ($1,$2,$3,$4,$5,$6) ON CONFLICT (app_name, email) DO UPDATE SET password_hash = EXCLUDED.password_hash, role = 'admin'`, ['HAMID', email, hashed, 'admin', 'petty_cash', appsList]);
     await pool.query(`INSERT INTO users (username, email, password_hash, role, app_name, allowed_apps) VALUES ($1,$2,$3,$4,$5,$6) ON CONFLICT (app_name, email) DO UPDATE SET password_hash = EXCLUDED.password_hash, role = 'admin'`, ['HAMID', email, hashed, 'admin', 'size_negar', appsList]);
-
     res.send('Admin accounts created/reset for all 3 apps.');
   } catch (err) { res.status(500).send(err.message); }
 });
 
-// ورود
 app.post('/api/login', async (req, res) => {
   const { email, password, app_name } = req.body;
   const targetApp = app_name || 'doakhtyar';
@@ -151,12 +137,10 @@ app.post('/api/login', async (req, res) => {
     if (!r.rows.length) return res.status(401).json({ error: 'Invalid credentials for this app' });
     const u = r.rows[0];
     if (!(await bcrypt.compare(password, u.password_hash))) return res.status(401).json({ error: 'Invalid' });
-    
     let responseRole = u.role;
     if (targetApp === 'doakhtyar') responseRole = toDoakhtyarRole(u.role);
     if (targetApp === 'petty_cash') responseRole = toPettyCashRole(u.role);
     if (targetApp === 'size_negar') responseRole = u.role;
-
     const token = jwt.sign({ id: u.id, role: responseRole, workshop_id: u.workshop_id, app_name: targetApp }, process.env.JWT_SECRET || 'super-secret-key', { expiresIn: '1d' });
     res.json({ token, user: { id: u.id, username: u.username, email: u.email, role: responseRole, workshop_id: u.workshop_id, allowed_apps: parseAllowedApps(u.allowed_apps) } });
   } catch (err) { res.status(500).json({ error: err.message }); }
@@ -180,16 +164,6 @@ app.post('/api/admin/users', auth, async (req, res) => {
     const dbRole = toDbRole(role);
     const r = await pool.query('INSERT INTO users (username, email, password_hash, role, workshop_id, allowed_apps, app_name) VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING id, username, email, role, workshop_id, allowed_apps', [username, email, hashed, dbRole, workshop_id || null, JSON.stringify(apps), 'doakhtyar']);
     res.status(201).json({ ...r.rows[0], role: toDoakhtyarRole(r.rows[0].role), allowed_apps: apps });
-  } catch (err) { res.status(500).json({ error: err.message }); }
-});
-
-app.put('/api/admin/users/:id/role', auth, async (req, res) => {
-  if (req.user.role !== 'admin' && req.user.role !== 'super_admin') return res.status(403).json({ error: 'Admin only' });
-  const { role } = req.body;
-  try {
-    const dbRole = toDbRole(role);
-    await pool.query('UPDATE users SET role=$1 WHERE id=$2 AND app_name=$3', [dbRole, req.params.id, 'doakhtyar']);
-    res.json({ message: 'Role updated', role: toDoakhtyarRole(dbRole) });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
@@ -234,16 +208,6 @@ app.post('/api/users', auth, async (req, res) => {
     const dbRole = toDbRole(role);
     const r = await pool.query('INSERT INTO users (username, email, password_hash, role, workshop_id, allowed_apps, app_name) VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING id, username, email, role, allowed_apps', [username || email.split('@')[0], email, hashed, dbRole, workshop_id || null, JSON.stringify(apps), 'petty_cash']);
     res.status(201).json({ ...r.rows[0], role: toPettyCashRole(r.rows[0].role), allowed_apps: apps });
-  } catch (err) { res.status(500).json({ error: err.message }); }
-});
-
-app.put('/api/users/:id/role', auth, async (req, res) => {
-  if (req.user.role !== 'admin' && req.user.role !== 'super_admin') return res.status(403).json({ error: 'Admin only' });
-  const { role } = req.body;
-  try {
-    const dbRole = toDbRole(role);
-    await pool.query('UPDATE users SET role=$1 WHERE id=$2 AND app_name=$3', [dbRole, req.params.id, 'petty_cash']);
-    res.json({ message: 'Role updated', role: toPettyCashRole(dbRole) });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
@@ -341,7 +305,6 @@ app.get('/api/store/:collection', auth, async (req, res) => {
     let query = 'SELECT id, json FROM app_rows WHERE collection=$1';
     let params = [collection];
 
-    // 🛡️ اعمال امنیت: اگر کاربر مسئول سایزگیری بود، فقط داده‌های مدرسه خودش را ببیند
     if (req.user.role === 'measurer' && (collection === 'size_negar_orders' || collection === 'size_negar_students')) {
       const wid = req.user.workshop_id || 'NONE';
       query += " AND (json->>'school' = $2 OR json->>'workshop_id' = $2)";
@@ -356,15 +319,31 @@ app.get('/api/store/:collection', auth, async (req, res) => {
   }
 });
 
+// 🛡️ اصلاح اساسی برای جلوگیری از خطای JSON
 app.post('/api/store/:collection', auth, async (req, res) => {
   try {
     const collection = req.params.collection;
-    const data = req.body;
-    if (!data || Object.keys(data).length === 0) return res.status(400).json({ error: 'سند خالی قابل ثبت نیست.' });
+    let data = req.body;
+    
+    if (!data || Object.keys(data).length === 0) {
+      return res.status(400).json({ error: 'سند خالی قابل ثبت نیست.' });
+    }
+
+    // اگر داده‌ها به صورت رشته آمده‌اند، آن را پارس کن
+    if (typeof data === 'string') {
+      try {
+        data = JSON.parse(data);
+      } catch (e) {
+        return res.status(400).json({ error: 'فرمت داده ارسالی نامعتبر است (JSON نامعتبر)' });
+      }
+    }
+
     const id = data.id || Date.now().toString();
     
-    // 🛡️ ارسال مستقیم آبجکت به pg (برای JSONB)
-    await pool.query('INSERT INTO app_rows (id, collection, json) VALUES ($1,$2,$3) ON CONFLICT (id) DO UPDATE SET json=EXCLUDED.json', [id, collection, data]);
+    // همیشه قبل از ارسال به pg، داده را به رشته JSON استاندارد تبدیل کن
+    const jsonString = JSON.stringify(data);
+    
+    await pool.query('INSERT INTO app_rows (id, collection, json) VALUES ($1,$2,$3) ON CONFLICT (id) DO UPDATE SET json=EXCLUDED.json', [id, collection, jsonString]);
     res.json({ message: 'Saved', id });
   } catch (err) { 
     console.error("POST Store Error:", err);
@@ -377,7 +356,6 @@ app.delete('/api/store/:collection/:id', auth, async (req, res) => {
   catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// ===== آمار داشبورد =====
 app.get('/api/dashboard/stats', auth, async (req, res) => {
   let response = { users: 0, workshops: 0, products: 0, dispatches: 0, deliveries: 0, defects: 0, total_wage: 0 };
   try {
@@ -395,7 +373,6 @@ app.get('/api/dashboard/stats', auth, async (req, res) => {
   res.json(response);
 });
 
-// ===== چت =====
 app.post('/api/chat/send', auth, async (req, res) => {
   const { receiver_id, text, image } = req.body;
   if (!receiver_id || (!text && !image)) return res.status(400).json({ error: 'Missing' });
@@ -444,7 +421,6 @@ app.get('/api/chat/contacts', auth, async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// ===== Reset =====
 app.delete('/api/admin/reset-workshop/:workshopId', auth, async (req, res) => {
   if (req.user.role !== 'admin' && req.user.role !== 'super_admin') return res.status(403).json({ error: 'Admin only' }); const wid = req.params.workshopId; const cols = ['dispatches','sewing_deliveries','wage_ledger','payments'];
   try {
@@ -460,6 +436,5 @@ app.delete('/api/admin/clear-all-transactions', auth, async (req, res) => {
   if (req.user.role !== 'admin' && req.user.role !== 'super_admin') return res.status(403).json({ error: 'Admin only' }); const cols = ['dispatches','dispatch_lines','dispatch_size_qty','workshop_receipts','workshop_receipt_lines','sewing_deliveries','sewing_delivery_lines','cut_defects','wage_ledger','payments','payment_allocations','adjustments','sync_queue','audit_log']; const r = await pool.query('DELETE FROM app_rows WHERE collection=ANY($1)', [cols]); res.json({ message: `Cleared ${r.rowCount} records` });
 });
 
-// 🚀 استارت سرور
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`Server on ${PORT}`));
