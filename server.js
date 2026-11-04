@@ -37,11 +37,16 @@ const createTables = async () => {
         password_hash VARCHAR(255) NOT NULL, 
         role VARCHAR(30) DEFAULT 'clerk', 
         workshop_id VARCHAR(50), 
+        assigned_schools JSONB DEFAULT '[]'::jsonb,
+        assigned_products JSONB DEFAULT '[]'::jsonb,
         allowed_apps JSONB DEFAULT '["doakhtyar"]'::jsonb, 
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       );
     `);
     await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS app_name VARCHAR(50) NOT NULL DEFAULT 'doakhtyar';`);
+    await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS assigned_schools JSONB DEFAULT '[]'::jsonb;`);
+    await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS assigned_products JSONB DEFAULT '[]'::jsonb;`);
+    
     await pool.query(`
       DO $$ BEGIN
         ALTER TABLE users DROP CONSTRAINT IF EXISTS users_email_key;
@@ -86,8 +91,8 @@ const safeParse = (data, dbId) => {
   return { ...obj, id: obj.id || dbId || Math.random().toString(36).substring(7) };
 };
 
-const parseAllowedApps = (apps) => {
-  let parsed = apps;
+const parseJsonArray = (arr) => {
+  let parsed = arr;
   if (typeof parsed === 'string') { try { parsed = JSON.parse(parsed); } catch(e) { parsed = []; } }
   return Array.isArray(parsed) ? parsed : [];
 };
@@ -141,8 +146,27 @@ app.post('/api/login', async (req, res) => {
     if (targetApp === 'doakhtyar') responseRole = toDoakhtyarRole(u.role);
     if (targetApp === 'petty_cash') responseRole = toPettyCashRole(u.role);
     if (targetApp === 'size_negar') responseRole = u.role;
-    const token = jwt.sign({ id: u.id, role: responseRole, workshop_id: u.workshop_id, app_name: targetApp }, process.env.JWT_SECRET || 'super-secret-key', { expiresIn: '1d' });
-    res.json({ token, user: { id: u.id, username: u.username, email: u.email, role: responseRole, workshop_id: u.workshop_id, allowed_apps: parseAllowedApps(u.allowed_apps) } });
+    const token = jwt.sign({ 
+      id: u.id, 
+      role: responseRole, 
+      workshop_id: u.workshop_id, 
+      app_name: targetApp,
+      assigned_schools: parseJsonArray(u.assigned_schools),
+      assigned_products: parseJsonArray(u.assigned_products)
+    }, process.env.JWT_SECRET || 'super-secret-key', { expiresIn: '1d' });
+    res.json({ 
+      token, 
+      user: { 
+        id: u.id, 
+        username: u.username, 
+        email: u.email, 
+        role: responseRole, 
+        workshop_id: u.workshop_id, 
+        assigned_schools: parseJsonArray(u.assigned_schools),
+        assigned_products: parseJsonArray(u.assigned_products),
+        allowed_apps: parseJsonArray(u.allowed_apps) 
+      } 
+    });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
@@ -150,8 +174,8 @@ app.post('/api/login', async (req, res) => {
 app.get('/api/admin/users', auth, async (req, res) => {
   if (req.user.role !== 'admin' && req.user.role !== 'super_admin') return res.status(403).json({ error: 'Admin only' });
   try {
-    const r = await pool.query('SELECT id, username, email, role, workshop_id, allowed_apps, created_at FROM users WHERE app_name = $1 ORDER BY id DESC', ['doakhtyar']);
-    res.json(r.rows.map(u => ({ ...u, role: toDoakhtyarRole(u.role), allowed_apps: parseAllowedApps(u.allowed_apps) })));
+    const r = await pool.query('SELECT id, username, email, role, workshop_id, assigned_schools, assigned_products, allowed_apps, created_at FROM users WHERE app_name = $1 ORDER BY id DESC', ['doakhtyar']);
+    res.json(r.rows.map(u => ({ ...u, role: toDoakhtyarRole(u.role), allowed_apps: parseJsonArray(u.allowed_apps), assigned_schools: parseJsonArray(u.assigned_schools), assigned_products: parseJsonArray(u.assigned_products) })));
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
@@ -160,7 +184,7 @@ app.post('/api/admin/users', auth, async (req, res) => {
   const { username, email, password, role, workshop_id, allowed_apps } = req.body;
   try {
     const hashed = await bcrypt.hash(password, 10);
-    const apps = parseAllowedApps(allowed_apps).length ? parseAllowedApps(allowed_apps) : ["doakhtyar"];
+    const apps = parseJsonArray(allowed_apps).length ? parseJsonArray(allowed_apps) : ["doakhtyar"];
     const dbRole = toDbRole(role);
     const r = await pool.query('INSERT INTO users (username, email, password_hash, role, workshop_id, allowed_apps, app_name) VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING id, username, email, role, workshop_id, allowed_apps', [username, email, hashed, dbRole, workshop_id || null, JSON.stringify(apps), 'doakhtyar']);
     res.status(201).json({ ...r.rows[0], role: toDoakhtyarRole(r.rows[0].role), allowed_apps: apps });
@@ -178,7 +202,7 @@ app.put('/api/admin/users/:id', auth, async (req, res) => {
     const finalEmail = email !== undefined ? email : u.email;
     const dbRole = role !== undefined ? toDbRole(role) : u.role;
     const finalWorkshopId = workshop_id !== undefined ? workshop_id : u.workshop_id;
-    const finalApps = JSON.stringify(parseAllowedApps(allowed_apps !== undefined ? allowed_apps : u.allowed_apps));
+    const finalApps = JSON.stringify(parseJsonArray(allowed_apps !== undefined ? allowed_apps : u.allowed_apps));
     await pool.query('UPDATE users SET username=$1, email=$2, role=$3, workshop_id=$4, allowed_apps=$5 WHERE id=$6 AND app_name=$7', [finalUsername, finalEmail, dbRole, finalWorkshopId, finalApps, req.params.id, 'doakhtyar']);
     res.json({ message: 'Updated' });
   } catch (err) { res.status(500).json({ error: err.message }); }
@@ -195,7 +219,7 @@ app.get('/api/users', auth, async (req, res) => {
   if (req.user.role !== 'admin' && req.user.role !== 'super_admin') return res.status(403).json({ error: 'Admin only' });
   try {
     const r = await pool.query('SELECT id, username, email, role, workshop_id, allowed_apps, created_at FROM users WHERE app_name = $1 ORDER BY id DESC', ['petty_cash']);
-    res.json(r.rows.map(u => ({ ...u, role: toPettyCashRole(u.role), allowed_apps: parseAllowedApps(u.allowed_apps) })));
+    res.json(r.rows.map(u => ({ ...u, role: toPettyCashRole(u.role), allowed_apps: parseJsonArray(u.allowed_apps) })));
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
@@ -204,7 +228,7 @@ app.post('/api/users', auth, async (req, res) => {
   const { username, email, password, role, workshop_id, allowed_apps } = req.body;
   try {
     const hashed = await bcrypt.hash(password, 10);
-    const apps = parseAllowedApps(allowed_apps).length ? parseAllowedApps(allowed_apps) : ["doakhtyar", "petty_cash", "size_negar"];
+    const apps = parseJsonArray(allowed_apps).length ? parseJsonArray(allowed_apps) : ["doakhtyar", "petty_cash", "size_negar"];
     const dbRole = toDbRole(role);
     const r = await pool.query('INSERT INTO users (username, email, password_hash, role, workshop_id, allowed_apps, app_name) VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING id, username, email, role, allowed_apps', [username || email.split('@')[0], email, hashed, dbRole, workshop_id || null, JSON.stringify(apps), 'petty_cash']);
     res.status(201).json({ ...r.rows[0], role: toPettyCashRole(r.rows[0].role), allowed_apps: apps });
@@ -222,7 +246,7 @@ app.put('/api/users/:id', auth, async (req, res) => {
     const finalEmail = email !== undefined ? email : u.email;
     const dbRole = role !== undefined ? toDbRole(role) : u.role;
     const finalWorkshopId = workshop_id !== undefined ? workshop_id : u.workshop_id;
-    const finalApps = JSON.stringify(parseAllowedApps(allowed_apps !== undefined ? allowed_apps : u.allowed_apps));
+    const finalApps = JSON.stringify(parseJsonArray(allowed_apps !== undefined ? allowed_apps : u.allowed_apps));
     if (password && password.trim() !== '') {
       const hashed = await bcrypt.hash(password, 10);
       await pool.query('UPDATE users SET username=$1, email=$2, role=$3, workshop_id=$4, allowed_apps=$5, password_hash=$6 WHERE id=$7 AND app_name=$8', [finalUsername, finalEmail, dbRole, finalWorkshopId, finalApps, hashed, req.params.id, 'petty_cash']);
@@ -241,24 +265,38 @@ app.delete('/api/users/:id', auth, async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// ===== مدیریت کاربران (سایز نگار) =====
+// ===== مدیریت کاربران (سایز نگار) - با پشتیبانی از چند مدرسه و چند محصول =====
 app.get('/api/size-negar/users', auth, async (req, res) => {
   if (req.user.role !== 'admin' && req.user.role !== 'super_admin') return res.status(403).json({ error: 'Admin only' });
   try {
-    const r = await pool.query('SELECT id, username, email, role, workshop_id, allowed_apps, created_at FROM users WHERE app_name = $1 ORDER BY id DESC', ['size_negar']);
-    res.json(r.rows.map(u => ({ ...u, allowed_apps: parseAllowedApps(u.allowed_apps) })));
+    const r = await pool.query('SELECT id, username, email, role, workshop_id, assigned_schools, assigned_products, allowed_apps, created_at FROM users WHERE app_name = $1 ORDER BY id DESC', ['size_negar']);
+    res.json(r.rows.map(u => ({ 
+      ...u, 
+      allowed_apps: parseJsonArray(u.allowed_apps),
+      assigned_schools: parseJsonArray(u.assigned_schools),
+      assigned_products: parseJsonArray(u.assigned_products)
+    })));
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
 app.post('/api/size-negar/users', auth, async (req, res) => {
   if (req.user.role !== 'admin' && req.user.role !== 'super_admin') return res.status(403).json({ error: 'Admin only' });
-  const { username, email, password, role, workshop_id, allowed_apps } = req.body;
+  const { username, email, password, role, workshop_id, assigned_schools, assigned_products, allowed_apps } = req.body;
   try {
     const hashed = await bcrypt.hash(password, 10);
-    const apps = parseAllowedApps(allowed_apps).length ? parseAllowedApps(allowed_apps) : ["size_negar"];
-    const r = await pool.query('INSERT INTO users (username, email, password_hash, role, workshop_id, allowed_apps, app_name) VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING id, username, email, role, allowed_apps', 
-      [username || email.split('@')[0], email, hashed, role || 'measurer', workshop_id || null, JSON.stringify(apps), 'size_negar']);
-    res.status(201).json({ ...r.rows[0], allowed_apps: apps });
+    const apps = parseJsonArray(allowed_apps).length ? parseJsonArray(allowed_apps) : ["size_negar"];
+    const schools = parseJsonArray(assigned_schools);
+    const products = parseJsonArray(assigned_products);
+    const r = await pool.query(
+      'INSERT INTO users (username, email, password_hash, role, workshop_id, assigned_schools, assigned_products, allowed_apps, app_name) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING id, username, email, role, workshop_id, assigned_schools, assigned_products, allowed_apps', 
+      [username || email.split('@')[0], email, hashed, role || 'measurer', workshop_id || null, JSON.stringify(schools), JSON.stringify(products), JSON.stringify(apps), 'size_negar']
+    );
+    res.status(201).json({ 
+      ...r.rows[0], 
+      allowed_apps: apps,
+      assigned_schools: schools,
+      assigned_products: products
+    });
   } catch (err) { 
     if (err.code === '23505') return res.status(400).json({ error: 'این ایمیل یا نام کاربری قبلا در سایز نگار ثبت شده است.' });
     res.status(500).json({ error: err.message }); 
@@ -267,7 +305,7 @@ app.post('/api/size-negar/users', auth, async (req, res) => {
 
 app.put('/api/size-negar/users/:id', auth, async (req, res) => {
   if (req.user.role !== 'admin' && req.user.role !== 'super_admin') return res.status(403).json({ error: 'Admin only' });
-  const { username, email, role, workshop_id, password, allowed_apps } = req.body;
+  const { username, email, role, workshop_id, password, assigned_schools, assigned_products, allowed_apps } = req.body;
   try {
     const existing = await pool.query('SELECT * FROM users WHERE id=$1 AND app_name=$2', [req.params.id, 'size_negar']);
     if (!existing.rows.length) return res.status(404).json({ error: 'User not found' });
@@ -276,15 +314,17 @@ app.put('/api/size-negar/users/:id', auth, async (req, res) => {
     const finalEmail = email !== undefined ? email : u.email;
     const finalRole = role !== undefined ? role : u.role;
     const finalWorkshopId = workshop_id !== undefined ? workshop_id : u.workshop_id;
-    const finalApps = JSON.stringify(parseAllowedApps(allowed_apps !== undefined ? allowed_apps : u.allowed_apps));
+    const finalApps = JSON.stringify(parseJsonArray(allowed_apps !== undefined ? allowed_apps : u.allowed_apps));
+    const finalSchools = JSON.stringify(parseJsonArray(assigned_schools !== undefined ? assigned_schools : u.assigned_schools));
+    const finalProducts = JSON.stringify(parseJsonArray(assigned_products !== undefined ? assigned_products : u.assigned_products));
     
     if (password && password.trim() !== '') {
       const hashed = await bcrypt.hash(password, 10);
-      await pool.query('UPDATE users SET username=$1, email=$2, role=$3, workshop_id=$4, allowed_apps=$5, password_hash=$6 WHERE id=$7 AND app_name=$8', 
-        [finalUsername, finalEmail, finalRole, finalWorkshopId, finalApps, hashed, req.params.id, 'size_negar']);
+      await pool.query('UPDATE users SET username=$1, email=$2, role=$3, workshop_id=$4, assigned_schools=$5, assigned_products=$6, allowed_apps=$7, password_hash=$8 WHERE id=$9 AND app_name=$10', 
+        [finalUsername, finalEmail, finalRole, finalWorkshopId, finalSchools, finalProducts, finalApps, hashed, req.params.id, 'size_negar']);
     } else {
-      await pool.query('UPDATE users SET username=$1, email=$2, role=$3, workshop_id=$4, allowed_apps=$5 WHERE id=$6 AND app_name=$7', 
-        [finalUsername, finalEmail, finalRole, finalWorkshopId, finalApps, req.params.id, 'size_negar']);
+      await pool.query('UPDATE users SET username=$1, email=$2, role=$3, workshop_id=$4, assigned_schools=$5, assigned_products=$6, allowed_apps=$7 WHERE id=$8 AND app_name=$9', 
+        [finalUsername, finalEmail, finalRole, finalWorkshopId, finalSchools, finalProducts, finalApps, req.params.id, 'size_negar']);
     }
     res.json({ message: 'Updated' });
   } catch (err) { res.status(500).json({ error: err.message }); }
@@ -298,18 +338,29 @@ app.delete('/api/size-negar/users/:id', auth, async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// ===== Store عمومی با امنیت داده‌های سایز نگار =====
+// ===== Store عمومی با امنیت چند مدرسه‌ای =====
 app.get('/api/store/:collection', auth, async (req, res) => {
   try {
     const collection = req.params.collection;
     let query = 'SELECT id, json FROM app_rows WHERE collection=$1';
     let params = [collection];
 
-    // 🛡️ اعمال امنیت: اگر کاربر مسئول سایزگیری بود، فقط داده‌های مدرسه خودش را ببیند
+    // 🛡️ اگر مسئول سایزگیری بود، فیلتر بر اساس مدارس تخصیص‌داده‌شده (با سازگاری به workshop_id قدیمی)
     if (req.user.role === 'measurer' && (collection === 'size_negar_orders' || collection === 'size_negar_students')) {
-      const wid = req.user.workshop_id || 'NONE';
-      query += " AND (json->>'school' = $2 OR json->>'workshop_id' = $2)";
-      params.push(wid);
+      const assignedSchools = parseJsonArray(req.user.assigned_schools);
+      const legacyWorkshopId = req.user.workshop_id;
+      
+      if (assignedSchools.length > 0) {
+        // حالت جدید: چند مدرسه
+        query += ` AND (json->>'school' = ANY($2) OR json->>'workshop_id' = ANY($2))`;
+        params.push(assignedSchools);
+      } else if (legacyWorkshopId) {
+        // حالت قدیمی: یک مدرسه (سازگاری با گذشته)
+        query += ` AND (json->>'school' = $2 OR json->>'workshop_id' = $2)`;
+        params.push(legacyWorkshopId);
+      } else {
+        return res.json([]);
+      }
     }
 
     const r = await pool.query(query, params);
@@ -320,21 +371,12 @@ app.get('/api/store/:collection', auth, async (req, res) => {
   }
 });
 
-// 🛡️ اصلاح نهایی برای سازگاری کامل با فرانت‌اند (پشتیبانی از آبجکت تکی و آرایه)
 app.post('/api/store/:collection', auth, async (req, res) => {
   try {
     const collection = req.params.collection;
     let data = req.body;
-    
-    if (!data || Object.keys(data).length === 0) {
-      return res.status(400).json({ error: 'سند خالی قابل ثبت نیست.' });
-    }
-
-    if (typeof data === 'string') {
-      try { data = JSON.parse(data); } catch (e) {
-        return res.status(400).json({ error: 'فرمت داده ارسالی نامعتبر است' });
-      }
-    }
+    if (!data || Object.keys(data).length === 0) return res.status(400).json({ error: 'سند خالی قابل ثبت نیست.' });
+    if (typeof data === 'string') { try { data = JSON.parse(data); } catch (e) { return res.status(400).json({ error: 'فرمت داده نامعتبر است' }); } }
 
     if (Array.isArray(data)) {
       const savedItems = [];
@@ -357,21 +399,15 @@ app.post('/api/store/:collection', auth, async (req, res) => {
   }
 });
 
-// 🗑️ مسیر اختصاصی برای پاک‌سازی دسته‌جمعی داده‌های یک مدرسه
 app.delete('/api/store/:collection/bulk', auth, async (req, res) => {
   try {
     const collection = req.params.collection;
     const { school } = req.query;
-    
-    if (!school) return res.status(400).json({ error: 'نام مدرسه برای پاک‌سازی الزامی است.' });
-    if (req.user.role !== 'admin' && req.user.role !== 'super_admin') return res.status(403).json({ error: 'فقط مدیر کل مجاز به پاک‌سازی است.' });
-
+    if (!school) return res.status(400).json({ error: 'نام مدرسه الزامی است.' });
+    if (req.user.role !== 'admin' && req.user.role !== 'super_admin') return res.status(403).json({ error: 'فقط مدیر کل مجاز است.' });
     await pool.query(`DELETE FROM app_rows WHERE collection=$1 AND (json->>'school' = $2 OR json->>'workshop_id' = $2)`, [collection, school]);
     res.json({ message: 'Bulk delete successful' });
-  } catch (err) { 
-    console.error("Bulk Delete Error:", err);
-    res.status(500).json({ error: err.message }); 
-  }
+  } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
 app.delete('/api/store/:collection/:id', auth, async (req, res) => {
@@ -386,7 +422,6 @@ app.get('/api/dashboard/stats', auth, async (req, res) => {
     const isAdmin = req.user.role === 'admin' || req.user.role === 'super_admin';
     const wid = req.user.workshop_id;
     const filter = !isAdmin && wid ? ` AND (json->>'workshop_id' = '${wid}' OR json->>'workshopId' = '${wid}')` : '';
-
     if (isAdmin) { const u = await pool.query('SELECT COUNT(*) FROM users WHERE app_name=$1', [req.user.app_name]); response.users = parseInt(u.rows[0].count) || 0; }
     const w = await pool.query(`SELECT COUNT(*) FROM app_rows WHERE collection='workshops'${filter}`); response.workshops = parseInt(w.rows[0].count) || 0;
     const p = await pool.query(`SELECT COUNT(*) FROM app_rows WHERE collection='products'${filter}`); response.products = parseInt(p.rows[0].count) || 0;
@@ -403,10 +438,8 @@ app.post('/api/chat/send', auth, async (req, res) => {
   if (!receiver_id || (!text && !image)) return res.status(400).json({ error: 'Missing' });
   const id = 'msg_' + Date.now(); 
   const data = { id, sender_id: req.user.id, receiver_id, text: text || '', image: image || null, status: 'sent', created_at: new Date().toISOString() };
-  try {
-    await pool.query('INSERT INTO app_rows (id, collection, json) VALUES ($1,$2,$3)', [id, 'messages', data]); 
-    res.status(201).json(data);
-  } catch (err) { res.status(500).json({ error: err.message }); }
+  try { await pool.query('INSERT INTO app_rows (id, collection, json) VALUES ($1,$2,$3)', [id, 'messages', data]); res.status(201).json(data); }
+  catch (err) { res.status(500).json({ error: err.message }); }
 });
 
 app.get('/api/chat/messages/:contactId', auth, async (req, res) => {
