@@ -265,7 +265,7 @@ app.delete('/api/users/:id', auth, async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// ===== مدیریت کاربران (سایز نگار) - با پشتیبانی از چند مدرسه و چند محصول =====
+// ===== مدیریت کاربران (سایز نگار) =====
 app.get('/api/size-negar/users', auth, async (req, res) => {
   if (req.user.role !== 'admin' && req.user.role !== 'super_admin') return res.status(403).json({ error: 'Admin only' });
   try {
@@ -345,17 +345,15 @@ app.get('/api/store/:collection', auth, async (req, res) => {
     let query = 'SELECT id, json FROM app_rows WHERE collection=$1';
     let params = [collection];
 
-    // 🛡️ اگر مسئول سایزگیری بود، فیلتر بر اساس مدارس تخصیص‌داده‌شده (با سازگاری به workshop_id قدیمی)
+    // 🛡️ اگر مسئول سایزگیری بود، فیلتر بر اساس مدارس تخصیص‌داده‌شده
     if (req.user.role === 'measurer' && (collection === 'size_negar_orders' || collection === 'size_negar_students')) {
       const assignedSchools = parseJsonArray(req.user.assigned_schools);
       const legacyWorkshopId = req.user.workshop_id;
       
       if (assignedSchools.length > 0) {
-        // حالت جدید: چند مدرسه
         query += ` AND (json->>'school' = ANY($2) OR json->>'workshop_id' = ANY($2))`;
         params.push(assignedSchools);
       } else if (legacyWorkshopId) {
-        // حالت قدیمی: یک مدرسه (سازگاری با گذشته)
         query += ` AND (json->>'school' = $2 OR json->>'workshop_id' = $2)`;
         params.push(legacyWorkshopId);
       } else {
@@ -399,15 +397,28 @@ app.post('/api/store/:collection', auth, async (req, res) => {
   }
 });
 
+// 🗑️ مسیر اختصاصی برای پاک‌سازی دسته‌جمعی (پشتیبانی از school=ALL)
 app.delete('/api/store/:collection/bulk', auth, async (req, res) => {
   try {
     const collection = req.params.collection;
     const { school } = req.query;
-    if (!school) return res.status(400).json({ error: 'نام مدرسه الزامی است.' });
+    
+    if (!school) return res.status(400).json({ error: 'نام مدرسه یا ALL الزامی است.' });
     if (req.user.role !== 'admin' && req.user.role !== 'super_admin') return res.status(403).json({ error: 'فقط مدیر کل مجاز است.' });
-    await pool.query(`DELETE FROM app_rows WHERE collection=$1 AND (json->>'school' = $2 OR json->>'workshop_id' = $2)`, [collection, school]);
+
+    if (school === 'ALL') {
+      // پاک کردن کل کالکشن
+      await pool.query(`DELETE FROM app_rows WHERE collection=$1`, [collection]);
+    } else {
+      // پاک کردن داده‌های یک مدرسه خاص
+      await pool.query(`DELETE FROM app_rows WHERE collection=$1 AND (json->>'school' = $2 OR json->>'workshop_id' = $2)`, [collection, school]);
+    }
+    
     res.json({ message: 'Bulk delete successful' });
-  } catch (err) { res.status(500).json({ error: err.message }); }
+  } catch (err) { 
+    console.error("Bulk Delete Error:", err);
+    res.status(500).json({ error: err.message }); 
+  }
 });
 
 app.delete('/api/store/:collection/:id', auth, async (req, res) => {
