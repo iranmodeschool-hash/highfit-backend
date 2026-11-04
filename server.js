@@ -117,22 +117,18 @@ const toPettyCashRole = (dbRole) => {
 
 app.get('/', (req, res) => res.send('HighFit Backend is running perfectly!'));
 
-// 🚀 راه‌اندازی ادمین اولیه
 app.get('/api/force-create-admin', async (req, res) => {
   const { email, password } = req.query;
   try {
     const hashed = await bcrypt.hash(password, 10);
     const appsList = JSON.stringify(["doakhtyar","petty_cash","size_negar"]);
-    
     await pool.query(`INSERT INTO users (username, email, password_hash, role, app_name, allowed_apps) VALUES ($1,$2,$3,$4,$5,$6) ON CONFLICT (app_name, email) DO UPDATE SET password_hash = EXCLUDED.password_hash, role = 'admin'`, ['HAMID', email, hashed, 'admin', 'doakhtyar', appsList]);
     await pool.query(`INSERT INTO users (username, email, password_hash, role, app_name, allowed_apps) VALUES ($1,$2,$3,$4,$5,$6) ON CONFLICT (app_name, email) DO UPDATE SET password_hash = EXCLUDED.password_hash, role = 'admin'`, ['HAMID', email, hashed, 'admin', 'petty_cash', appsList]);
     await pool.query(`INSERT INTO users (username, email, password_hash, role, app_name, allowed_apps) VALUES ($1,$2,$3,$4,$5,$6) ON CONFLICT (app_name, email) DO UPDATE SET password_hash = EXCLUDED.password_hash, role = 'admin'`, ['HAMID', email, hashed, 'admin', 'size_negar', appsList]);
-
     res.send('Admin accounts created/reset for all 3 apps.');
   } catch (err) { res.status(500).send(err.message); }
 });
 
-// ورود
 app.post('/api/login', async (req, res) => {
   const { email, password, app_name } = req.body;
   const targetApp = app_name || 'doakhtyar';
@@ -141,12 +137,10 @@ app.post('/api/login', async (req, res) => {
     if (!r.rows.length) return res.status(401).json({ error: 'Invalid credentials for this app' });
     const u = r.rows[0];
     if (!(await bcrypt.compare(password, u.password_hash))) return res.status(401).json({ error: 'Invalid' });
-    
     let responseRole = u.role;
     if (targetApp === 'doakhtyar') responseRole = toDoakhtyarRole(u.role);
     if (targetApp === 'petty_cash') responseRole = toPettyCashRole(u.role);
     if (targetApp === 'size_negar') responseRole = u.role;
-
     const token = jwt.sign({ id: u.id, role: responseRole, workshop_id: u.workshop_id, app_name: targetApp }, process.env.JWT_SECRET || 'super-secret-key', { expiresIn: '1d' });
     res.json({ token, user: { id: u.id, username: u.username, email: u.email, role: responseRole, workshop_id: u.workshop_id, allowed_apps: parseAllowedApps(u.allowed_apps) } });
   } catch (err) { res.status(500).json({ error: err.message }); }
@@ -170,16 +164,6 @@ app.post('/api/admin/users', auth, async (req, res) => {
     const dbRole = toDbRole(role);
     const r = await pool.query('INSERT INTO users (username, email, password_hash, role, workshop_id, allowed_apps, app_name) VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING id, username, email, role, workshop_id, allowed_apps', [username, email, hashed, dbRole, workshop_id || null, JSON.stringify(apps), 'doakhtyar']);
     res.status(201).json({ ...r.rows[0], role: toDoakhtyarRole(r.rows[0].role), allowed_apps: apps });
-  } catch (err) { res.status(500).json({ error: err.message }); }
-});
-
-app.put('/api/admin/users/:id/role', auth, async (req, res) => {
-  if (req.user.role !== 'admin' && req.user.role !== 'super_admin') return res.status(403).json({ error: 'Admin only' });
-  const { role } = req.body;
-  try {
-    const dbRole = toDbRole(role);
-    await pool.query('UPDATE users SET role=$1 WHERE id=$2 AND app_name=$3', [dbRole, req.params.id, 'doakhtyar']);
-    res.json({ message: 'Role updated', role: toDoakhtyarRole(dbRole) });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
@@ -224,16 +208,6 @@ app.post('/api/users', auth, async (req, res) => {
     const dbRole = toDbRole(role);
     const r = await pool.query('INSERT INTO users (username, email, password_hash, role, workshop_id, allowed_apps, app_name) VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING id, username, email, role, allowed_apps', [username || email.split('@')[0], email, hashed, dbRole, workshop_id || null, JSON.stringify(apps), 'petty_cash']);
     res.status(201).json({ ...r.rows[0], role: toPettyCashRole(r.rows[0].role), allowed_apps: apps });
-  } catch (err) { res.status(500).json({ error: err.message }); }
-});
-
-app.put('/api/users/:id/role', auth, async (req, res) => {
-  if (req.user.role !== 'admin' && req.user.role !== 'super_admin') return res.status(403).json({ error: 'Admin only' });
-  const { role } = req.body;
-  try {
-    const dbRole = toDbRole(role);
-    await pool.query('UPDATE users SET role=$1 WHERE id=$2 AND app_name=$3', [dbRole, req.params.id, 'petty_cash']);
-    res.json({ message: 'Role updated', role: toPettyCashRole(dbRole) });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
@@ -383,6 +357,23 @@ app.post('/api/store/:collection', auth, async (req, res) => {
   }
 });
 
+// 🗑️ مسیر اختصاصی برای پاک‌سازی دسته‌جمعی داده‌های یک مدرسه
+app.delete('/api/store/:collection/bulk', auth, async (req, res) => {
+  try {
+    const collection = req.params.collection;
+    const { school } = req.query;
+    
+    if (!school) return res.status(400).json({ error: 'نام مدرسه برای پاک‌سازی الزامی است.' });
+    if (req.user.role !== 'admin' && req.user.role !== 'super_admin') return res.status(403).json({ error: 'فقط مدیر کل مجاز به پاک‌سازی است.' });
+
+    await pool.query(`DELETE FROM app_rows WHERE collection=$1 AND (json->>'school' = $2 OR json->>'workshop_id' = $2)`, [collection, school]);
+    res.json({ message: 'Bulk delete successful' });
+  } catch (err) { 
+    console.error("Bulk Delete Error:", err);
+    res.status(500).json({ error: err.message }); 
+  }
+});
+
 app.delete('/api/store/:collection/:id', auth, async (req, res) => {
   try { await pool.query('DELETE FROM app_rows WHERE id=$1', [req.params.id]); res.json({ message: 'Deleted' }); }
   catch (err) { res.status(500).json({ error: err.message }); }
@@ -471,6 +462,5 @@ app.delete('/api/admin/clear-all-transactions', auth, async (req, res) => {
   if (req.user.role !== 'admin' && req.user.role !== 'super_admin') return res.status(403).json({ error: 'Admin only' }); const cols = ['dispatches','dispatch_lines','dispatch_size_qty','workshop_receipts','workshop_receipt_lines','sewing_deliveries','sewing_delivery_lines','cut_defects','wage_ledger','payments','payment_allocations','adjustments','sync_queue','audit_log']; const r = await pool.query('DELETE FROM app_rows WHERE collection=ANY($1)', [cols]); res.json({ message: `Cleared ${r.rowCount} records` });
 });
 
-// 🚀 استارت سرور
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`Server on ${PORT}`));
