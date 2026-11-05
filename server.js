@@ -122,6 +122,7 @@ const toPettyCashRole = (dbRole) => {
 
 app.get('/', (req, res) => res.send('HighFit Backend is running perfectly!'));
 
+// 🚀 راه‌اندازی ادمین اولیه
 app.get('/api/force-create-admin', async (req, res) => {
   const { email, password } = req.query;
   try {
@@ -407,10 +408,8 @@ app.delete('/api/store/:collection/bulk', auth, async (req, res) => {
     if (req.user.role !== 'admin' && req.user.role !== 'super_admin') return res.status(403).json({ error: 'فقط مدیر کل مجاز است.' });
 
     if (school === 'ALL') {
-      // پاک کردن کل کالکشن
       await pool.query(`DELETE FROM app_rows WHERE collection=$1`, [collection]);
     } else {
-      // پاک کردن داده‌های یک مدرسه خاص
       await pool.query(`DELETE FROM app_rows WHERE collection=$1 AND (json->>'school' = $2 OR json->>'workshop_id' = $2)`, [collection, school]);
     }
     
@@ -424,6 +423,42 @@ app.delete('/api/store/:collection/bulk', auth, async (req, res) => {
 app.delete('/api/store/:collection/:id', auth, async (req, res) => {
   try { await pool.query('DELETE FROM app_rows WHERE id=$1', [req.params.id]); res.json({ message: 'Deleted' }); }
   catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// ===== تنظیمات اختصاصی اپ‌ها (لینک بروزرسانی) =====
+// این مسیرها تضمین می‌کنند که لینک بروزرسانی مستقل از کالکشن عمومی کار کند.
+app.post('/api/settings/update-link', auth, async (req, res) => {
+  try {
+    const { url, app_name } = req.body;
+    if (!url || !app_name) return res.status(400).json({ error: 'URL و app_name الزامی هستند.' });
+    
+    // ذخیره در جدول app_rows با یک شناسه یکتا برای هر اپ
+    const id = `update_link_${app_name}`;
+    await pool.query(
+      'INSERT INTO app_rows (id, collection, json) VALUES ($1,$2,$3) ON CONFLICT (id) DO UPDATE SET json=EXCLUDED.json',
+      [id, 'app_settings', JSON.stringify({ id, url, app_name, updated_at: new Date().toISOString() })]
+    );
+    
+    console.log(`✅ Update link saved for ${app_name}: ${url}`);
+    res.json({ message: 'Saved', url });
+  } catch (err) {
+    console.error("Save Update Link Error:", err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get('/api/settings/update-link/:app_name', auth, async (req, res) => {
+  try {
+    const { app_name } = req.params;
+    const id = `update_link_${app_name}`;
+    const r = await pool.query('SELECT json FROM app_rows WHERE id=$1', [id]);
+    if (!r.rows.length) return res.json({ url: null });
+    const data = safeParse(r.rows[0].json);
+    res.json({ url: data.url || null });
+  } catch (err) {
+    console.error("Get Update Link Error:", err);
+    res.status(500).json({ error: err.message });
+  }
 });
 
 // ===== آمار داشبورد =====
