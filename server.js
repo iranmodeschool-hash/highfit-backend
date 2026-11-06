@@ -135,6 +135,7 @@ app.get('/api/force-create-admin', async (req, res) => {
   } catch (err) { res.status(500).send(err.message); }
 });
 
+// ورود
 app.post('/api/login', async (req, res) => {
   const { email, password, app_name } = req.body;
   const targetApp = app_name || 'doakhtyar';
@@ -346,7 +347,6 @@ app.get('/api/store/:collection', auth, async (req, res) => {
     let query = 'SELECT id, json FROM app_rows WHERE collection=$1';
     let params = [collection];
 
-    // 🛡️ اگر مسئول سایزگیری بود، فیلتر بر اساس مدارس تخصیص‌داده‌شده
     if (req.user.role === 'measurer' && (collection === 'size_negar_orders' || collection === 'size_negar_students')) {
       const assignedSchools = parseJsonArray(req.user.assigned_schools);
       const legacyWorkshopId = req.user.workshop_id;
@@ -398,7 +398,6 @@ app.post('/api/store/:collection', auth, async (req, res) => {
   }
 });
 
-// 🗑️ مسیر اختصاصی برای پاک‌سازی دسته‌جمعی (پشتیبانی از school=ALL)
 app.delete('/api/store/:collection/bulk', auth, async (req, res) => {
   try {
     const collection = req.params.collection;
@@ -426,13 +425,11 @@ app.delete('/api/store/:collection/:id', auth, async (req, res) => {
 });
 
 // ===== تنظیمات اختصاصی اپ‌ها (لینک بروزرسانی) =====
-// این مسیرها تضمین می‌کنند که لینک بروزرسانی مستقل از کالکشن عمومی کار کند.
 app.post('/api/settings/update-link', auth, async (req, res) => {
   try {
     const { url, app_name } = req.body;
     if (!url || !app_name) return res.status(400).json({ error: 'URL و app_name الزامی هستند.' });
     
-    // ذخیره در جدول app_rows با یک شناسه یکتا برای هر اپ
     const id = `update_link_${app_name}`;
     await pool.query(
       'INSERT INTO app_rows (id, collection, json) VALUES ($1,$2,$3) ON CONFLICT (id) DO UPDATE SET json=EXCLUDED.json',
@@ -458,6 +455,37 @@ app.get('/api/settings/update-link/:app_name', auth, async (req, res) => {
   } catch (err) {
     console.error("Get Update Link Error:", err);
     res.status(500).json({ error: err.message });
+  }
+});
+
+// ===== 🔔 اعلان‌ها (خلاصه برای Badge و اعلان سیستمی) =====
+app.get('/api/notifications/summary', auth, async (req, res) => {
+  try {
+    const myId = String(req.user.id);
+    const appName = req.user.app_name;
+    
+    // ۱. پیام‌های چت خوانده‌نشده (که من گیرنده هستم و وضعیت seen نیست)
+    const msgResult = await pool.query(
+      `SELECT COUNT(*) FROM app_rows WHERE collection='messages' AND json->>'receiver_id' = $1 AND json->>'status' != 'seen'`,
+      [myId]
+    );
+    const chatUnread = parseInt(msgResult.rows[0].count) || 0;
+    
+    // ۲. اقلام در انتظار تایید (بسته به اپ)
+    let pendingCount = 0;
+    
+    if (appName === 'size_negar' && (req.user.role === 'admin' || req.user.role === 'supervisor')) {
+      const r = await pool.query(`SELECT COUNT(*) FROM app_rows WHERE collection='size_negar_orders' AND json->>'status' = 'pending'`);
+      pendingCount = parseInt(r.rows[0].count) || 0;
+    } else if (appName === 'petty_cash' && (req.user.role === 'admin' || req.user.role === 'financial_manager')) {
+      const r = await pool.query(`SELECT COUNT(*) FROM app_rows WHERE collection='petty_cash_payments' AND json->>'status' = 'pending'`);
+      pendingCount = parseInt(r.rows[0].count) || 0;
+    }
+    
+    res.json({ chatUnread, pendingCount, total: chatUnread + pendingCount });
+  } catch (err) { 
+    console.error("Notification Summary Error:", err);
+    res.status(500).json({ error: err.message }); 
   }
 });
 
