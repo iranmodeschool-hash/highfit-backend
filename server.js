@@ -430,7 +430,6 @@ app.get('/api/store/:collection', auth, async (req, res) => {
     let query = 'SELECT id, json FROM app_rows WHERE collection=$1';
     let params = [collection];
 
-    // 🛡️ فیلتر امنیتی سایز نگار (measurer)
     if (req.user.role === 'measurer' && (collection === 'size_negar_orders' || collection === 'size_negar_students')) {
       const assignedSchools = parseJsonArray(req.user.assigned_schools);
       const legacyWorkshopId = req.user.workshop_id;
@@ -446,12 +445,10 @@ app.get('/api/store/:collection', auth, async (req, res) => {
       }
     }
 
-    // 🛡️ فیلتر امنیتی CRM (نقش sales فقط داده‌های خودش)
     if (req.user.app_name === 'highfit_crm' && req.user.role === 'sales') {
       const userId = String(req.user.id);
       
       if (collection === 'crm_schools') {
-        // مدارس: تحت مالکیت یا تخصیص‌یافته
         const assigned = parseJsonArray(req.user.assigned_schools);
         if (assigned.length > 0) {
           query += ` AND (json->>'id' = ANY($2) OR json->>'ownerId' = $3)`;
@@ -461,16 +458,10 @@ app.get('/api/store/:collection', auth, async (req, res) => {
           params.push(userId);
         }
       } else if (collection === 'crm_contracts') {
-        // قراردادها: فقط قراردادهایی که ownerId آن‌ها برابر کاربر است
         query += ` AND json->>'ownerId' = $2`;
         params.push(userId);
-      } else if (collection === 'crm_payments') {
-        // پرداخت‌ها: فیلتر از طریق قراردادهای مالک (پیچیده‌تر، فعلاً همه پرداخت‌ها را نشان نده)
-        // برای شروع، همه پرداخت‌های قراردادهایی که ownerId آن‌ها برابر کاربر است
-        // (چون پرداخت ownerId مستقیم ندارد، فیلتر را در فرانت‌اند انجام می‌دهیم)
-        // فعلاً بدون فیلتر - در فاز بعدی بهبود می‌یابد
       } else if (collection === 'crm_opportunities') {
-        query += ` AND (json->>'ownerId' = $2 OR json->>'schoolId' = ANY(SELECT json->>'id' FROM app_rows WHERE collection='crm_schools' AND json->>'ownerId' = $2))`;
+        query += ` AND (json->>'ownerId' = $2)`;
         params.push(userId);
       }
     }
@@ -511,33 +502,12 @@ app.post('/api/store/:collection', auth, async (req, res) => {
   }
 });
 
-app.delete('/api/store/:collection/bulk', auth, async (req, res) => {
-  try {
-    const collection = req.params.collection;
-    const { school } = req.query;
-    
-    if (!school) return res.status(400).json({ error: 'نام مدرسه یا ALL الزامی است.' });
-    if (req.user.role !== 'admin' && req.user.role !== 'super_admin') return res.status(403).json({ error: 'فقط مدیر کل مجاز است.' });
-
-    if (school === 'ALL') {
-      await pool.query(`DELETE FROM app_rows WHERE collection=$1`, [collection]);
-    } else {
-      await pool.query(`DELETE FROM app_rows WHERE collection=$1 AND (json->>'school' = $2 OR json->>'workshop_id' = $2)`, [collection, school]);
-    }
-    
-    res.json({ message: 'Bulk delete successful' });
-  } catch (err) { 
-    console.error("Bulk Delete Error:", err);
-    res.status(500).json({ error: err.message }); 
-  }
-});
-
 app.delete('/api/store/:collection/:id', auth, async (req, res) => {
   try { await pool.query('DELETE FROM app_rows WHERE id=$1', [req.params.id]); res.json({ message: 'Deleted' }); }
   catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// ===== تنظیمات اختصاصی اپ‌ها (لینک بروزرسانی) =====
+// ===== تنظیمات (لینک بروزرسانی) =====
 app.post('/api/settings/update-link', auth, async (req, res) => {
   try {
     const { url, app_name } = req.body;
@@ -570,15 +540,27 @@ app.get('/api/settings/update-link/:app_name', auth, async (req, res) => {
   }
 });
 
-// ===== اعلان‌ها (خلاصه برای Badge) =====
+// ===== 🔔 اعلان‌ها (خلاصه برای Badge - اصلاح‌شده برای فیلتر app_name) =====
 app.get('/api/notifications/summary', auth, async (req, res) => {
   try {
     const myId = String(req.user.id);
     const appName = req.user.app_name;
     
+    // 🛡️ شمارش پیام‌های خوانده‌نشده فقط در همان اپ
+    // برای پیام‌ها، app_name در فیلد sender_id نمی‌آید، پس باید از users چک کنیم
+    // اما چون receiver_id من هستم و من در این اپ لاگین کرده‌ام، پیام‌های همه اپ‌ها می‌آیند.
+    // برای فیلتر، از users استفاده می‌کنیم: sender باید در همان app_name باشد.
     const msgResult = await pool.query(
-      `SELECT COUNT(*) FROM app_rows WHERE collection='messages' AND json->>'receiver_id' = $1 AND json->>'status' != 'seen'`,
-      [myId]
+      `SELECT COUNT(*) FROM app_rows m
+       WHERE m.collection='messages' 
+       AND m.json->>'receiver_id' = $1 
+       AND m.json->>'status' != 'seen'
+       AND EXISTS (
+         SELECT 1 FROM users u 
+         WHERE u.id::text = m.json->>'sender_id' 
+         AND u.app_name = $2
+       )`,
+      [myId, appName]
     );
     const chatUnread = parseInt(msgResult.rows[0].count) || 0;
     
@@ -616,28 +598,69 @@ app.get('/api/dashboard/stats', auth, async (req, res) => {
   res.json(response);
 });
 
-// ===== چت =====
+// ===== چت (اصلاح‌شده: با ذخیره app_name در پیام) =====
 app.post('/api/chat/send', auth, async (req, res) => {
   const { receiver_id, text, image } = req.body;
   if (!receiver_id || (!text && !image)) return res.status(400).json({ error: 'Missing' });
-  const id = 'msg_' + Date.now(); 
-  const data = { id, sender_id: req.user.id, receiver_id, text: text || '', image: image || null, status: 'sent', created_at: new Date().toISOString() };
-  try { await pool.query('INSERT INTO app_rows (id, collection, json) VALUES ($1,$2,$3)', [id, 'messages', data]); res.status(201).json(data); }
+  const id = 'msg_' + Date.now() + '_' + Math.random().toString(36).substring(7); 
+  const data = { 
+    id, 
+    sender_id: req.user.id, 
+    receiver_id, 
+    text: text || '', 
+    image: image || null, 
+    status: 'sent', 
+    app_name: req.user.app_name,
+    created_at: new Date().toISOString() 
+  };
+  try { 
+    await pool.query('INSERT INTO app_rows (id, collection, json) VALUES ($1,$2,$3)', [id, 'messages', JSON.stringify(data)]); 
+    res.status(201).json(data); 
+  }
   catch (err) { res.status(500).json({ error: err.message }); }
 });
 
 app.get('/api/chat/messages/:contactId', auth, async (req, res) => {
   const myId = req.user.id, cid = req.params.contactId;
+  const appName = req.user.app_name;
   try {
-    await pool.query(`UPDATE app_rows SET json=jsonb_set(json,'{status}','"delivered"') WHERE collection='messages' AND json->>'sender_id'=$1 AND json->>'receiver_id'=$2 AND json->>'status'='sent'`, [cid, myId]);
-    const r = await pool.query(`SELECT id, json FROM app_rows WHERE collection='messages' AND ((json->>'sender_id'=$1 AND json->>'receiver_id'=$2) OR (json->>'sender_id'=$2 AND json->>'receiver_id'=$1)) ORDER BY (json->>'created_at') ASC`, [myId, cid]);
+    // علامت delivered
+    await pool.query(
+      `UPDATE app_rows SET json=jsonb_set(json,'{status}','"delivered"') 
+       WHERE collection='messages' 
+       AND json->>'sender_id'=$1 
+       AND json->>'receiver_id'=$2 
+       AND json->>'status'='sent'
+       AND json->>'app_name'=$3`, 
+      [cid, myId, appName]
+    );
+    // خواندن پیام‌ها (فقط همان اپ)
+    const r = await pool.query(
+      `SELECT id, json FROM app_rows 
+       WHERE collection='messages' 
+       AND json->>'app_name'=$3
+       AND (
+         (json->>'sender_id'=$1 AND json->>'receiver_id'=$2) 
+         OR (json->>'sender_id'=$2 AND json->>'receiver_id'=$1)
+       ) 
+       ORDER BY (json->>'created_at') ASC`, 
+      [myId, cid, appName]
+    );
     res.json(r.rows.map(x => safeParse(x.json, x.id)));
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
 app.put('/api/chat/seen/:contactId', auth, async (req, res) => {
   try {
-    await pool.query(`UPDATE app_rows SET json=jsonb_set(json,'{status}','"seen"') WHERE collection='messages' AND json->>'sender_id'=$1 AND json->>'receiver_id'=$2 AND json->>'status' IN ('sent','delivered')`, [req.params.contactId, req.user.id]); 
+    await pool.query(
+      `UPDATE app_rows SET json=jsonb_set(json,'{status}','"seen"') 
+       WHERE collection='messages' 
+       AND json->>'sender_id'=$1 
+       AND json->>'receiver_id'=$2 
+       AND json->>'app_name'=$3
+       AND json->>'status' IN ('sent','delivered')`, 
+      [req.params.contactId, req.user.id, req.user.app_name]
+    ); 
     res.json({ message: 'Seen' });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
@@ -659,7 +682,7 @@ app.get('/api/chat/contacts', auth, async (req, res) => {
     let q = 'SELECT id, username, role, workshop_id FROM users WHERE app_name=$1', p = [targetApp]; 
     if (req.user.role !== 'admin' && req.user.role !== 'super_admin') { q += ' AND role=$2'; p.push('admin'); } 
     const r = await pool.query(q, p); 
-    res.json(r.rows.map(u => ({ ...u, role: targetApp === 'doakhtyar' ? toDoakhtyarRole(u.role) : toPettyCashRole(u.role) })));
+    res.json(r.rows.map(u => ({ ...u, role: targetApp === 'doakhtyar' ? toDoakhtyarRole(u.role) : targetApp === 'highfit_crm' ? toCrmRole(u.role) : toPettyCashRole(u.role) })));
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
