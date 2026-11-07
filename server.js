@@ -100,9 +100,10 @@ const parseJsonArray = (arr) => {
 const toDbRole = (role) => {
   if (!role) return 'clerk';
   const r = role.toString().trim().toLowerCase();
-  if (r === 'admin' || r === 'super_admin' || r === 'مدیر کل') return 'admin';
+  if (r === 'admin' || r === 'super_admin' || r === 'مدیر کل' || r === 'مدیر') return 'admin';
   if (r === 'financial_manager' || r === 'مدیر مالی' || r === 'supervisor') return 'financial_manager';
   if (r === 'clerk' || r === 'تنخواه گردان' || r === 'تنخواه‌گردان' || r === 'workshop_manager') return 'clerk';
+  if (r === 'sales' || r === 'کارشناس فروش') return 'sales';
   return 'clerk';
 };
 
@@ -120,18 +121,35 @@ const toPettyCashRole = (dbRole) => {
   return 'clerk';
 };
 
+// 🆕 نقش‌های CRM: admin و sales
+const toCrmRole = (dbRole) => {
+  if (dbRole === 'admin') return 'admin';
+  if (dbRole === 'sales') return 'sales';
+  return 'sales';
+};
+
 app.get('/', (req, res) => res.send('HighFit Backend is running perfectly!'));
 
-// 🚀 راه‌اندازی ادمین اولیه
+// 🚀 راه‌اندازی ادمین اولیه (برای ۴ اپ)
 app.get('/api/force-create-admin', async (req, res) => {
   const { email, password } = req.query;
   try {
     const hashed = await bcrypt.hash(password, 10);
-    const appsList = JSON.stringify(["doakhtyar","petty_cash","size_negar"]);
+    const appsList = JSON.stringify(["doakhtyar","petty_cash","size_negar","highfit_crm"]);
+    
+    // دوختیار
     await pool.query(`INSERT INTO users (username, email, password_hash, role, app_name, allowed_apps) VALUES ($1,$2,$3,$4,$5,$6) ON CONFLICT (app_name, email) DO UPDATE SET password_hash = EXCLUDED.password_hash, role = 'admin'`, ['HAMID', email, hashed, 'admin', 'doakhtyar', appsList]);
+    
+    // تنخواه‌یار
     await pool.query(`INSERT INTO users (username, email, password_hash, role, app_name, allowed_apps) VALUES ($1,$2,$3,$4,$5,$6) ON CONFLICT (app_name, email) DO UPDATE SET password_hash = EXCLUDED.password_hash, role = 'admin'`, ['HAMID', email, hashed, 'admin', 'petty_cash', appsList]);
+    
+    // سایز نگار
     await pool.query(`INSERT INTO users (username, email, password_hash, role, app_name, allowed_apps) VALUES ($1,$2,$3,$4,$5,$6) ON CONFLICT (app_name, email) DO UPDATE SET password_hash = EXCLUDED.password_hash, role = 'admin'`, ['HAMID', email, hashed, 'admin', 'size_negar', appsList]);
-    res.send('Admin accounts created/reset for all 3 apps.');
+    
+    // 🆕 High Fit CRM
+    await pool.query(`INSERT INTO users (username, email, password_hash, role, app_name, allowed_apps) VALUES ($1,$2,$3,$4,$5,$6) ON CONFLICT (app_name, email) DO UPDATE SET password_hash = EXCLUDED.password_hash, role = 'admin'`, ['HAMID', email, hashed, 'admin', 'highfit_crm', appsList]);
+    
+    res.send('Admin accounts created/reset for all 4 apps.');
   } catch (err) { res.status(500).send(err.message); }
 });
 
@@ -148,6 +166,7 @@ app.post('/api/login', async (req, res) => {
     if (targetApp === 'doakhtyar') responseRole = toDoakhtyarRole(u.role);
     if (targetApp === 'petty_cash') responseRole = toPettyCashRole(u.role);
     if (targetApp === 'size_negar') responseRole = u.role;
+    if (targetApp === 'highfit_crm') responseRole = toCrmRole(u.role);
     const token = jwt.sign({ 
       id: u.id, 
       role: responseRole, 
@@ -230,7 +249,7 @@ app.post('/api/users', auth, async (req, res) => {
   const { username, email, password, role, workshop_id, allowed_apps } = req.body;
   try {
     const hashed = await bcrypt.hash(password, 10);
-    const apps = parseJsonArray(allowed_apps).length ? parseJsonArray(allowed_apps) : ["doakhtyar", "petty_cash", "size_negar"];
+    const apps = parseJsonArray(allowed_apps).length ? parseJsonArray(allowed_apps) : ["doakhtyar", "petty_cash", "size_negar", "highfit_crm"];
     const dbRole = toDbRole(role);
     const r = await pool.query('INSERT INTO users (username, email, password_hash, role, workshop_id, allowed_apps, app_name) VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING id, username, email, role, allowed_apps', [username || email.split('@')[0], email, hashed, dbRole, workshop_id || null, JSON.stringify(apps), 'petty_cash']);
     res.status(201).json({ ...r.rows[0], role: toPettyCashRole(r.rows[0].role), allowed_apps: apps });
@@ -336,6 +355,70 @@ app.delete('/api/size-negar/users/:id', auth, async (req, res) => {
   if (req.user.role !== 'admin' && req.user.role !== 'super_admin') return res.status(403).json({ error: 'Admin only' });
   try {
     await pool.query('DELETE FROM users WHERE id=$1 AND app_name=$2', [req.params.id, 'size_negar']);
+    res.json({ message: 'Deleted' });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// ===== 🆕 مدیریت کاربران (High Fit CRM) =====
+app.get('/api/crm/users', auth, async (req, res) => {
+  if (req.user.role !== 'admin' && req.user.role !== 'super_admin') return res.status(403).json({ error: 'Admin only' });
+  try {
+    const r = await pool.query('SELECT id, username, email, role, workshop_id, allowed_apps, created_at FROM users WHERE app_name = $1 ORDER BY id DESC', ['highfit_crm']);
+    res.json(r.rows.map(u => ({ 
+      ...u, 
+      role: toCrmRole(u.role),
+      allowed_apps: parseJsonArray(u.allowed_apps)
+    })));
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.post('/api/crm/users', auth, async (req, res) => {
+  if (req.user.role !== 'admin' && req.user.role !== 'super_admin') return res.status(403).json({ error: 'Admin only' });
+  const { username, email, password, role, workshop_id, allowed_apps } = req.body;
+  try {
+    const hashed = await bcrypt.hash(password, 10);
+    const apps = parseJsonArray(allowed_apps).length ? parseJsonArray(allowed_apps) : ["highfit_crm"];
+    const finalRole = (role === 'admin') ? 'admin' : 'sales';
+    const r = await pool.query(
+      'INSERT INTO users (username, email, password_hash, role, workshop_id, allowed_apps, app_name) VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING id, username, email, role, allowed_apps', 
+      [username || email.split('@')[0], email, hashed, finalRole, workshop_id || null, JSON.stringify(apps), 'highfit_crm']
+    );
+    res.status(201).json({ ...r.rows[0], role: toCrmRole(r.rows[0].role), allowed_apps: apps });
+  } catch (err) { 
+    if (err.code === '23505') return res.status(400).json({ error: 'این ایمیل یا نام کاربری قبلا در CRM ثبت شده است.' });
+    res.status(500).json({ error: err.message }); 
+  }
+});
+
+app.put('/api/crm/users/:id', auth, async (req, res) => {
+  if (req.user.role !== 'admin' && req.user.role !== 'super_admin') return res.status(403).json({ error: 'Admin only' });
+  const { username, email, role, workshop_id, password, allowed_apps } = req.body;
+  try {
+    const existing = await pool.query('SELECT * FROM users WHERE id=$1 AND app_name=$2', [req.params.id, 'highfit_crm']);
+    if (!existing.rows.length) return res.status(404).json({ error: 'User not found' });
+    const u = existing.rows[0];
+    const finalUsername = username !== undefined ? username : u.username;
+    const finalEmail = email !== undefined ? email : u.email;
+    const finalRole = role !== undefined ? ((role === 'admin') ? 'admin' : 'sales') : u.role;
+    const finalWorkshopId = workshop_id !== undefined ? workshop_id : u.workshop_id;
+    const finalApps = JSON.stringify(parseJsonArray(allowed_apps !== undefined ? allowed_apps : u.allowed_apps));
+    
+    if (password && password.trim() !== '') {
+      const hashed = await bcrypt.hash(password, 10);
+      await pool.query('UPDATE users SET username=$1, email=$2, role=$3, workshop_id=$4, allowed_apps=$5, password_hash=$6 WHERE id=$7 AND app_name=$8', 
+        [finalUsername, finalEmail, finalRole, finalWorkshopId, finalApps, hashed, req.params.id, 'highfit_crm']);
+    } else {
+      await pool.query('UPDATE users SET username=$1, email=$2, role=$3, workshop_id=$4, allowed_apps=$5 WHERE id=$6 AND app_name=$7', 
+        [finalUsername, finalEmail, finalRole, finalWorkshopId, finalApps, req.params.id, 'highfit_crm']);
+    }
+    res.json({ message: 'Updated' });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.delete('/api/crm/users/:id', auth, async (req, res) => {
+  if (req.user.role !== 'admin' && req.user.role !== 'super_admin') return res.status(403).json({ error: 'Admin only' });
+  try {
+    await pool.query('DELETE FROM users WHERE id=$1 AND app_name=$2', [req.params.id, 'highfit_crm']);
     res.json({ message: 'Deleted' });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
@@ -464,14 +547,12 @@ app.get('/api/notifications/summary', auth, async (req, res) => {
     const myId = String(req.user.id);
     const appName = req.user.app_name;
     
-    // ۱. پیام‌های چت خوانده‌نشده (که من گیرنده هستم و وضعیت seen نیست)
     const msgResult = await pool.query(
       `SELECT COUNT(*) FROM app_rows WHERE collection='messages' AND json->>'receiver_id' = $1 AND json->>'status' != 'seen'`,
       [myId]
     );
     const chatUnread = parseInt(msgResult.rows[0].count) || 0;
     
-    // ۲. اقلام در انتظار تایید (بسته به اپ)
     let pendingCount = 0;
     
     if (appName === 'size_negar' && (req.user.role === 'admin' || req.user.role === 'supervisor')) {
