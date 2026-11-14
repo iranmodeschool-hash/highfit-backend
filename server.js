@@ -511,6 +511,29 @@ app.post('/api/store/:collection', auth, async (req, res) => {
   }
 });
 
+// 🆕 مسیر عمومی ثبت درخواست عضویت (بدون نیاز به لاگین)
+app.post('/api/public/register-request', async (req, res) => {
+  try {
+    const { fullName, email, mobile, position, schoolName, password } = req.body;
+    if (!fullName || !email || !password) return res.status(400).json({ error: 'اطلاعات ناقص است' });
+    
+    // بررسی وجود درخواست قبلی (برای جلوگیری از اسپم)
+    const existing = await pool.query(
+      `SELECT id FROM app_rows WHERE collection='crm_membership_requests' AND json->>'email' = $1 AND json->>'status' = 'pending'`, 
+      [email]
+    );
+    if (existing.rows.length > 0) return res.status(400).json({ error: 'درخواست قبلی برای این ایمیل در انتظار بررسی است' });
+
+    const id = 'req_' + Date.now() + '_' + Math.random().toString(36).substring(7);
+    const data = { id, fullName, email, mobile, position, schoolName, password, status: 'pending', createdAt: new Date().toISOString() };
+    
+    await pool.query('INSERT INTO app_rows (id, collection, json) VALUES ($1,$2,$3)', [id, 'crm_membership_requests', JSON.stringify(data)]);
+    res.status(201).json({ message: 'Request submitted successfully', id });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 app.delete('/api/store/:collection/bulk', auth, async (req, res) => {
   try {
     const collection = req.params.collection;
