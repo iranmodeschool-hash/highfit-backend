@@ -37,6 +37,8 @@ const createTables = async () => {
         password_hash VARCHAR(255) NOT NULL, 
         role VARCHAR(30) DEFAULT 'clerk', 
         workshop_id VARCHAR(50), 
+        mobile VARCHAR(20),
+        position VARCHAR(100),
         assigned_schools JSONB DEFAULT '[]'::jsonb,
         assigned_products JSONB DEFAULT '[]'::jsonb,
         allowed_apps JSONB DEFAULT '["doakhtyar"]'::jsonb, 
@@ -46,6 +48,8 @@ const createTables = async () => {
     await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS app_name VARCHAR(50) NOT NULL DEFAULT 'doakhtyar';`);
     await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS assigned_schools JSONB DEFAULT '[]'::jsonb;`);
     await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS assigned_products JSONB DEFAULT '[]'::jsonb;`);
+    await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS mobile VARCHAR(20);`);
+    await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS position VARCHAR(100);`);
     
     await pool.query(`
       DO $$ BEGIN
@@ -63,8 +67,6 @@ const createTables = async () => {
         ALTER TABLE users ADD CONSTRAINT users_app_username_key UNIQUE (app_name, username);
       EXCEPTION WHEN OTHERS THEN NULL; END $$;
     `);
-    
-    // ⚠️ کد مهاجرت خودکار کاربران (که باعث می‌شد کاربران دوختیار در تنخواه‌یار ظاهر شوند) کاملاً حذف شد.
     
     await pool.query(`CREATE TABLE IF NOT EXISTS app_rows (id VARCHAR(100) PRIMARY KEY, collection VARCHAR(50) NOT NULL, json JSONB NOT NULL, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP);`);
     console.log("Tables ready & Migrated successfully");
@@ -126,8 +128,7 @@ const toCrmRole = (dbRole) => {
 
 app.get('/', (req, res) => res.send('HighFit Backend is running perfectly!'));
 
-// 🚀 راه‌اندازی ادمین اولیه (برای همه اپ‌ها)
-// این مسیر فقط برای ساخت ادمین اصلی در هر ۴ اپ است و چون با لینک مخفی اجرا می‌شود، مشکل امنیتی ندارد.
+// 🚀 راه‌اندازی ادمین اولیه
 app.get('/api/force-create-admin', async (req, res) => {
   const { email, password } = req.query;
   try {
@@ -173,6 +174,8 @@ app.post('/api/login', async (req, res) => {
         email: u.email, 
         role: responseRole, 
         workshop_id: u.workshop_id, 
+        mobile: u.mobile,
+        position: u.position,
         assigned_schools: parseJsonArray(u.assigned_schools),
         assigned_products: parseJsonArray(u.assigned_products),
         allowed_apps: parseJsonArray(u.allowed_apps) 
@@ -185,26 +188,26 @@ app.post('/api/login', async (req, res) => {
 app.get('/api/admin/users', auth, async (req, res) => {
   if (req.user.role !== 'admin' && req.user.role !== 'super_admin') return res.status(403).json({ error: 'Admin only' });
   try {
-    const r = await pool.query('SELECT id, username, email, role, workshop_id, assigned_schools, assigned_products, allowed_apps, created_at FROM users WHERE app_name = $1 ORDER BY id DESC', ['doakhtyar']);
+    const r = await pool.query('SELECT id, username, email, role, workshop_id, mobile, position, assigned_schools, assigned_products, allowed_apps, created_at FROM users WHERE app_name = $1 ORDER BY id DESC', ['doakhtyar']);
     res.json(r.rows.map(u => ({ ...u, role: toDoakhtyarRole(u.role), allowed_apps: parseJsonArray(u.allowed_apps), assigned_schools: parseJsonArray(u.assigned_schools), assigned_products: parseJsonArray(u.assigned_products) })));
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
 app.post('/api/admin/users', auth, async (req, res) => {
   if (req.user.role !== 'admin' && req.user.role !== 'super_admin') return res.status(403).json({ error: 'Admin only' });
-  const { username, email, password, role, workshop_id, allowed_apps } = req.body;
+  const { username, email, password, role, workshop_id, mobile, position, allowed_apps } = req.body;
   try {
     const hashed = await bcrypt.hash(password, 10);
     const apps = parseJsonArray(allowed_apps).length ? parseJsonArray(allowed_apps) : ["doakhtyar"];
     const dbRole = toDbRole(role);
-    const r = await pool.query('INSERT INTO users (username, email, password_hash, role, workshop_id, allowed_apps, app_name) VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING id, username, email, role, workshop_id, allowed_apps', [username, email, hashed, dbRole, workshop_id || null, JSON.stringify(apps), 'doakhtyar']);
+    const r = await pool.query('INSERT INTO users (username, email, password_hash, role, workshop_id, mobile, position, allowed_apps, app_name) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING id, username, email, role, workshop_id, mobile, position, allowed_apps', [username, email, hashed, dbRole, workshop_id || null, mobile || null, position || null, JSON.stringify(apps), 'doakhtyar']);
     res.status(201).json({ ...r.rows[0], role: toDoakhtyarRole(r.rows[0].role), allowed_apps: apps });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
 app.put('/api/admin/users/:id', auth, async (req, res) => {
   if (req.user.role !== 'admin' && req.user.role !== 'super_admin') return res.status(403).json({ error: 'Admin only' });
-  const { username, email, role, workshop_id, allowed_apps } = req.body;
+  const { username, email, role, workshop_id, mobile, position, allowed_apps } = req.body;
   try {
     const existing = await pool.query('SELECT * FROM users WHERE id=$1 AND app_name=$2', [req.params.id, 'doakhtyar']);
     if (!existing.rows.length) return res.status(404).json({ error: 'User not found' });
@@ -213,8 +216,10 @@ app.put('/api/admin/users/:id', auth, async (req, res) => {
     const finalEmail = email !== undefined ? email : u.email;
     const dbRole = role !== undefined ? toDbRole(role) : u.role;
     const finalWorkshopId = workshop_id !== undefined ? workshop_id : u.workshop_id;
+    const finalMobile = mobile !== undefined ? mobile : u.mobile;
+    const finalPosition = position !== undefined ? position : u.position;
     const finalApps = JSON.stringify(parseJsonArray(allowed_apps !== undefined ? allowed_apps : u.allowed_apps));
-    await pool.query('UPDATE users SET username=$1, email=$2, role=$3, workshop_id=$4, allowed_apps=$5 WHERE id=$6 AND app_name=$7', [finalUsername, finalEmail, dbRole, finalWorkshopId, finalApps, req.params.id, 'doakhtyar']);
+    await pool.query('UPDATE users SET username=$1, email=$2, role=$3, workshop_id=$4, mobile=$5, position=$6, allowed_apps=$7 WHERE id=$8 AND app_name=$9', [finalUsername, finalEmail, dbRole, finalWorkshopId, finalMobile, finalPosition, finalApps, req.params.id, 'doakhtyar']);
     res.json({ message: 'Updated' });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
@@ -229,26 +234,26 @@ app.delete('/api/admin/users/:id', auth, async (req, res) => {
 app.get('/api/users', auth, async (req, res) => {
   if (req.user.role !== 'admin' && req.user.role !== 'super_admin') return res.status(403).json({ error: 'Admin only' });
   try {
-    const r = await pool.query('SELECT id, username, email, role, workshop_id, allowed_apps, created_at FROM users WHERE app_name = $1 ORDER BY id DESC', ['petty_cash']);
+    const r = await pool.query('SELECT id, username, email, role, workshop_id, mobile, position, allowed_apps, created_at FROM users WHERE app_name = $1 ORDER BY id DESC', ['petty_cash']);
     res.json(r.rows.map(u => ({ ...u, role: toPettyCashRole(u.role), allowed_apps: parseJsonArray(u.allowed_apps) })));
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
 app.post('/api/users', auth, async (req, res) => {
   if (req.user.role !== 'admin' && req.user.role !== 'super_admin') return res.status(403).json({ error: 'Admin only' });
-  const { username, email, password, role, workshop_id, allowed_apps } = req.body;
+  const { username, email, password, role, workshop_id, mobile, position, allowed_apps } = req.body;
   try {
     const hashed = await bcrypt.hash(password, 10);
     const apps = parseJsonArray(allowed_apps).length ? parseJsonArray(allowed_apps) : ["doakhtyar", "petty_cash", "size_negar", "highfit_crm"];
     const dbRole = toDbRole(role);
-    const r = await pool.query('INSERT INTO users (username, email, password_hash, role, workshop_id, allowed_apps, app_name) VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING id, username, email, role, allowed_apps', [username || email.split('@')[0], email, hashed, dbRole, workshop_id || null, JSON.stringify(apps), 'petty_cash']);
+    const r = await pool.query('INSERT INTO users (username, email, password_hash, role, workshop_id, mobile, position, allowed_apps, app_name) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING id, username, email, role, mobile, position, allowed_apps', [username || email.split('@')[0], email, hashed, dbRole, workshop_id || null, mobile || null, position || null, JSON.stringify(apps), 'petty_cash']);
     res.status(201).json({ ...r.rows[0], role: toPettyCashRole(r.rows[0].role), allowed_apps: apps });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
 app.put('/api/users/:id', auth, async (req, res) => {
   if (req.user.role !== 'admin' && req.user.role !== 'super_admin') return res.status(403).json({ error: 'Admin only' });
-  const { username, email, role, workshop_id, password, allowed_apps } = req.body;
+  const { username, email, role, workshop_id, password, mobile, position, allowed_apps } = req.body;
   try {
     const existing = await pool.query('SELECT * FROM users WHERE id=$1 AND app_name=$2', [req.params.id, 'petty_cash']);
     if (!existing.rows.length) return res.status(404).json({ error: 'User not found' });
@@ -257,12 +262,14 @@ app.put('/api/users/:id', auth, async (req, res) => {
     const finalEmail = email !== undefined ? email : u.email;
     const dbRole = role !== undefined ? toDbRole(role) : u.role;
     const finalWorkshopId = workshop_id !== undefined ? workshop_id : u.workshop_id;
+    const finalMobile = mobile !== undefined ? mobile : u.mobile;
+    const finalPosition = position !== undefined ? position : u.position;
     const finalApps = JSON.stringify(parseJsonArray(allowed_apps !== undefined ? allowed_apps : u.allowed_apps));
     if (password && password.trim() !== '') {
       const hashed = await bcrypt.hash(password, 10);
-      await pool.query('UPDATE users SET username=$1, email=$2, role=$3, workshop_id=$4, allowed_apps=$5, password_hash=$6 WHERE id=$7 AND app_name=$8', [finalUsername, finalEmail, dbRole, finalWorkshopId, finalApps, hashed, req.params.id, 'petty_cash']);
+      await pool.query('UPDATE users SET username=$1, email=$2, role=$3, workshop_id=$4, mobile=$5, position=$6, allowed_apps=$7, password_hash=$8 WHERE id=$9 AND app_name=$10', [finalUsername, finalEmail, dbRole, finalWorkshopId, finalMobile, finalPosition, finalApps, hashed, req.params.id, 'petty_cash']);
     } else {
-      await pool.query('UPDATE users SET username=$1, email=$2, role=$3, workshop_id=$4, allowed_apps=$5 WHERE id=$6 AND app_name=$7', [finalUsername, finalEmail, dbRole, finalWorkshopId, finalApps, req.params.id, 'petty_cash']);
+      await pool.query('UPDATE users SET username=$1, email=$2, role=$3, workshop_id=$4, mobile=$5, position=$6, allowed_apps=$7 WHERE id=$8 AND app_name=$9', [finalUsername, finalEmail, dbRole, finalWorkshopId, finalMobile, finalPosition, finalApps, req.params.id, 'petty_cash']);
     }
     res.json({ message: 'Updated' });
   } catch (err) { res.status(500).json({ error: err.message }); }
@@ -280,7 +287,7 @@ app.delete('/api/users/:id', auth, async (req, res) => {
 app.get('/api/size-negar/users', auth, async (req, res) => {
   if (req.user.role !== 'admin' && req.user.role !== 'super_admin') return res.status(403).json({ error: 'Admin only' });
   try {
-    const r = await pool.query('SELECT id, username, email, role, workshop_id, assigned_schools, assigned_products, allowed_apps, created_at FROM users WHERE app_name = $1 ORDER BY id DESC', ['size_negar']);
+    const r = await pool.query('SELECT id, username, email, role, workshop_id, mobile, position, assigned_schools, assigned_products, allowed_apps, created_at FROM users WHERE app_name = $1 ORDER BY id DESC', ['size_negar']);
     res.json(r.rows.map(u => ({ 
       ...u, 
       allowed_apps: parseJsonArray(u.allowed_apps),
@@ -292,15 +299,15 @@ app.get('/api/size-negar/users', auth, async (req, res) => {
 
 app.post('/api/size-negar/users', auth, async (req, res) => {
   if (req.user.role !== 'admin' && req.user.role !== 'super_admin') return res.status(403).json({ error: 'Admin only' });
-  const { username, email, password, role, workshop_id, assigned_schools, assigned_products, allowed_apps } = req.body;
+  const { username, email, password, role, workshop_id, mobile, position, assigned_schools, assigned_products, allowed_apps } = req.body;
   try {
     const hashed = await bcrypt.hash(password, 10);
     const apps = parseJsonArray(allowed_apps).length ? parseJsonArray(allowed_apps) : ["size_negar"];
     const schools = parseJsonArray(assigned_schools);
     const products = parseJsonArray(assigned_products);
     const r = await pool.query(
-      'INSERT INTO users (username, email, password_hash, role, workshop_id, assigned_schools, assigned_products, allowed_apps, app_name) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING id, username, email, role, workshop_id, assigned_schools, assigned_products, allowed_apps', 
-      [username || email.split('@')[0], email, hashed, role || 'measurer', workshop_id || null, JSON.stringify(schools), JSON.stringify(products), JSON.stringify(apps), 'size_negar']
+      'INSERT INTO users (username, email, password_hash, role, workshop_id, mobile, position, assigned_schools, assigned_products, allowed_apps, app_name) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) RETURNING id, username, email, role, workshop_id, mobile, position, assigned_schools, assigned_products, allowed_apps', 
+      [username || email.split('@')[0], email, hashed, role || 'measurer', workshop_id || null, mobile || null, position || null, JSON.stringify(schools), JSON.stringify(products), JSON.stringify(apps), 'size_negar']
     );
     res.status(201).json({ 
       ...r.rows[0], 
@@ -316,7 +323,7 @@ app.post('/api/size-negar/users', auth, async (req, res) => {
 
 app.put('/api/size-negar/users/:id', auth, async (req, res) => {
   if (req.user.role !== 'admin' && req.user.role !== 'super_admin') return res.status(403).json({ error: 'Admin only' });
-  const { username, email, role, workshop_id, password, assigned_schools, assigned_products, allowed_apps } = req.body;
+  const { username, email, role, workshop_id, password, mobile, position, assigned_schools, assigned_products, allowed_apps } = req.body;
   try {
     const existing = await pool.query('SELECT * FROM users WHERE id=$1 AND app_name=$2', [req.params.id, 'size_negar']);
     if (!existing.rows.length) return res.status(404).json({ error: 'User not found' });
@@ -325,17 +332,19 @@ app.put('/api/size-negar/users/:id', auth, async (req, res) => {
     const finalEmail = email !== undefined ? email : u.email;
     const finalRole = role !== undefined ? role : u.role;
     const finalWorkshopId = workshop_id !== undefined ? workshop_id : u.workshop_id;
+    const finalMobile = mobile !== undefined ? mobile : u.mobile;
+    const finalPosition = position !== undefined ? position : u.position;
     const finalApps = JSON.stringify(parseJsonArray(allowed_apps !== undefined ? allowed_apps : u.allowed_apps));
     const finalSchools = JSON.stringify(parseJsonArray(assigned_schools !== undefined ? assigned_schools : u.assigned_schools));
     const finalProducts = JSON.stringify(parseJsonArray(assigned_products !== undefined ? assigned_products : u.assigned_products));
     
     if (password && password.trim() !== '') {
       const hashed = await bcrypt.hash(password, 10);
-      await pool.query('UPDATE users SET username=$1, email=$2, role=$3, workshop_id=$4, assigned_schools=$5, assigned_products=$6, allowed_apps=$7, password_hash=$8 WHERE id=$9 AND app_name=$10', 
-        [finalUsername, finalEmail, finalRole, finalWorkshopId, finalSchools, finalProducts, finalApps, hashed, req.params.id, 'size_negar']);
+      await pool.query('UPDATE users SET username=$1, email=$2, role=$3, workshop_id=$4, mobile=$5, position=$6, assigned_schools=$7, assigned_products=$8, allowed_apps=$9, password_hash=$10 WHERE id=$11 AND app_name=$12', 
+        [finalUsername, finalEmail, finalRole, finalWorkshopId, finalMobile, finalPosition, finalSchools, finalProducts, finalApps, hashed, req.params.id, 'size_negar']);
     } else {
-      await pool.query('UPDATE users SET username=$1, email=$2, role=$3, workshop_id=$4, assigned_schools=$5, assigned_products=$6, allowed_apps=$7 WHERE id=$8 AND app_name=$9', 
-        [finalUsername, finalEmail, finalRole, finalWorkshopId, finalSchools, finalProducts, finalApps, req.params.id, 'size_negar']);
+      await pool.query('UPDATE users SET username=$1, email=$2, role=$3, workshop_id=$4, mobile=$5, position=$6, assigned_schools=$7, assigned_products=$8, allowed_apps=$9 WHERE id=$10 AND app_name=$11', 
+        [finalUsername, finalEmail, finalRole, finalWorkshopId, finalMobile, finalPosition, finalSchools, finalProducts, finalApps, req.params.id, 'size_negar']);
     }
     res.json({ message: 'Updated' });
   } catch (err) { res.status(500).json({ error: err.message }); }
@@ -353,7 +362,7 @@ app.delete('/api/size-negar/users/:id', auth, async (req, res) => {
 app.get('/api/crm/users', auth, async (req, res) => {
   if (req.user.role !== 'admin' && req.user.role !== 'super_admin') return res.status(403).json({ error: 'Admin only' });
   try {
-    const r = await pool.query('SELECT id, username, email, role, workshop_id, assigned_schools, allowed_apps, created_at FROM users WHERE app_name = $1 ORDER BY id DESC', ['highfit_crm']);
+    const r = await pool.query('SELECT id, username, email, role, workshop_id, mobile, position, assigned_schools, allowed_apps, created_at FROM users WHERE app_name = $1 ORDER BY id DESC', ['highfit_crm']);
     res.json(r.rows.map(u => ({ 
       ...u, 
       role: toCrmRole(u.role),
@@ -365,15 +374,15 @@ app.get('/api/crm/users', auth, async (req, res) => {
 
 app.post('/api/crm/users', auth, async (req, res) => {
   if (req.user.role !== 'admin' && req.user.role !== 'super_admin') return res.status(403).json({ error: 'Admin only' });
-  const { username, email, password, role, workshop_id, assigned_schools, allowed_apps } = req.body;
+  const { username, email, password, role, workshop_id, mobile, position, assigned_schools, allowed_apps } = req.body;
   try {
     const hashed = await bcrypt.hash(password, 10);
     const apps = parseJsonArray(allowed_apps).length ? parseJsonArray(allowed_apps) : ["highfit_crm"];
     const finalRole = (role === 'admin') ? 'admin' : 'sales';
     const schools = parseJsonArray(assigned_schools);
     const r = await pool.query(
-      'INSERT INTO users (username, email, password_hash, role, workshop_id, assigned_schools, allowed_apps, app_name) VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING id, username, email, role, assigned_schools, allowed_apps', 
-      [username || email.split('@')[0], email, hashed, finalRole, workshop_id || null, JSON.stringify(schools), JSON.stringify(apps), 'highfit_crm']
+      'INSERT INTO users (username, email, password_hash, role, workshop_id, mobile, position, assigned_schools, allowed_apps, app_name) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING id, username, email, role, mobile, position, assigned_schools, allowed_apps', 
+      [username || email.split('@')[0], email, hashed, finalRole, workshop_id || null, mobile || null, position || null, JSON.stringify(schools), JSON.stringify(apps), 'highfit_crm']
     );
     res.status(201).json({ 
       ...r.rows[0], 
@@ -389,7 +398,7 @@ app.post('/api/crm/users', auth, async (req, res) => {
 
 app.put('/api/crm/users/:id', auth, async (req, res) => {
   if (req.user.role !== 'admin' && req.user.role !== 'super_admin') return res.status(403).json({ error: 'Admin only' });
-  const { username, email, role, workshop_id, password, assigned_schools, allowed_apps } = req.body;
+  const { username, email, role, workshop_id, password, mobile, position, assigned_schools, allowed_apps } = req.body;
   try {
     const existing = await pool.query('SELECT * FROM users WHERE id=$1 AND app_name=$2', [req.params.id, 'highfit_crm']);
     if (!existing.rows.length) return res.status(404).json({ error: 'User not found' });
@@ -398,16 +407,18 @@ app.put('/api/crm/users/:id', auth, async (req, res) => {
     const finalEmail = email !== undefined ? email : u.email;
     const finalRole = role !== undefined ? ((role === 'admin') ? 'admin' : 'sales') : u.role;
     const finalWorkshopId = workshop_id !== undefined ? workshop_id : u.workshop_id;
+    const finalMobile = mobile !== undefined ? mobile : u.mobile;
+    const finalPosition = position !== undefined ? position : u.position;
     const finalApps = JSON.stringify(parseJsonArray(allowed_apps !== undefined ? allowed_apps : u.allowed_apps));
     const finalSchools = JSON.stringify(parseJsonArray(assigned_schools !== undefined ? assigned_schools : u.assigned_schools));
     
     if (password && password.trim() !== '') {
       const hashed = await bcrypt.hash(password, 10);
-      await pool.query('UPDATE users SET username=$1, email=$2, role=$3, workshop_id=$4, assigned_schools=$5, allowed_apps=$6, password_hash=$7 WHERE id=$8 AND app_name=$9', 
-        [finalUsername, finalEmail, finalRole, finalWorkshopId, finalSchools, finalApps, hashed, req.params.id, 'highfit_crm']);
+      await pool.query('UPDATE users SET username=$1, email=$2, role=$3, workshop_id=$4, mobile=$5, position=$6, assigned_schools=$7, allowed_apps=$8, password_hash=$9 WHERE id=$10 AND app_name=$11', 
+        [finalUsername, finalEmail, finalRole, finalWorkshopId, finalMobile, finalPosition, finalSchools, finalApps, hashed, req.params.id, 'highfit_crm']);
     } else {
-      await pool.query('UPDATE users SET username=$1, email=$2, role=$3, workshop_id=$4, assigned_schools=$5, allowed_apps=$6 WHERE id=$7 AND app_name=$8', 
-        [finalUsername, finalEmail, finalRole, finalWorkshopId, finalSchools, finalApps, req.params.id, 'highfit_crm']);
+      await pool.query('UPDATE users SET username=$1, email=$2, role=$3, workshop_id=$4, mobile=$5, position=$6, assigned_schools=$7, allowed_apps=$8 WHERE id=$9 AND app_name=$10', 
+        [finalUsername, finalEmail, finalRole, finalWorkshopId, finalMobile, finalPosition, finalSchools, finalApps, req.params.id, 'highfit_crm']);
     }
     res.json({ message: 'Updated' });
   } catch (err) { res.status(500).json({ error: err.message }); }
@@ -428,7 +439,6 @@ app.get('/api/store/:collection', auth, async (req, res) => {
     let query = 'SELECT id, json FROM app_rows WHERE collection=$1';
     let params = [collection];
 
-    // 🛡️ فیلتر امنیتی سایز نگار (measurer)
     if (req.user.role === 'measurer' && (collection === 'size_negar_orders' || collection === 'size_negar_students')) {
       const assignedSchools = parseJsonArray(req.user.assigned_schools);
       const legacyWorkshopId = req.user.workshop_id;
@@ -444,7 +454,6 @@ app.get('/api/store/:collection', auth, async (req, res) => {
       }
     }
 
-    // 🛡️ فیلتر امنیتی CRM (sales)
     if (req.user.app_name === 'highfit_crm' && req.user.role === 'sales') {
       const userId = String(req.user.id);
       
