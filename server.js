@@ -128,19 +128,23 @@ const toCrmRole = (dbRole) => {
 
 app.get('/', (req, res) => res.send('HighFit Backend is running perfectly!'));
 
-// 🚀 راه‌اندازی ادمین اولیه
+// 🚀 راه‌اندازی ادمین اولیه (آپدیت شده برای 5 اپ)
 app.get('/api/force-create-admin', async (req, res) => {
   const { email, password } = req.query;
   try {
     const hashed = await bcrypt.hash(password, 10);
-    const appsList = JSON.stringify(["doakhtyar","petty_cash","size_negar","highfit_crm"]);
+    // اضافه شدن highfit_web به لیست اپ‌های مجاز
+    const appsList = JSON.stringify(["doakhtyar","petty_cash","size_negar","highfit_crm","highfit_web"]);
     
     await pool.query(`INSERT INTO users (username, email, password_hash, role, app_name, allowed_apps) VALUES ($1,$2,$3,$4,$5,$6) ON CONFLICT (app_name, email) DO UPDATE SET password_hash = EXCLUDED.password_hash, role = 'admin'`, ['HAMID', email, hashed, 'admin', 'doakhtyar', appsList]);
     await pool.query(`INSERT INTO users (username, email, password_hash, role, app_name, allowed_apps) VALUES ($1,$2,$3,$4,$5,$6) ON CONFLICT (app_name, email) DO UPDATE SET password_hash = EXCLUDED.password_hash, role = 'admin'`, ['HAMID', email, hashed, 'admin', 'petty_cash', appsList]);
     await pool.query(`INSERT INTO users (username, email, password_hash, role, app_name, allowed_apps) VALUES ($1,$2,$3,$4,$5,$6) ON CONFLICT (app_name, email) DO UPDATE SET password_hash = EXCLUDED.password_hash, role = 'admin'`, ['HAMID', email, hashed, 'admin', 'size_negar', appsList]);
     await pool.query(`INSERT INTO users (username, email, password_hash, role, app_name, allowed_apps) VALUES ($1,$2,$3,$4,$5,$6) ON CONFLICT (app_name, email) DO UPDATE SET password_hash = EXCLUDED.password_hash, role = 'admin'`, ['HAMID', email, hashed, 'admin', 'highfit_crm', appsList]);
     
-    res.send('Admin accounts created/reset for all 4 apps.');
+    // خط جدید برای وب‌سایت (highfit_web)
+    await pool.query(`INSERT INTO users (username, email, password_hash, role, app_name, allowed_apps) VALUES ($1,$2,$3,$4,$5,$6) ON CONFLICT (app_name, email) DO UPDATE SET password_hash = EXCLUDED.password_hash, role = 'admin'`, ['HAMID', email, hashed, 'admin', 'highfit_web', appsList]);
+    
+    res.send('Admin accounts created/reset for all 5 apps.');
   } catch (err) { res.status(500).send(err.message); }
 });
 
@@ -153,11 +157,14 @@ app.post('/api/login', async (req, res) => {
     if (!r.rows.length) return res.status(401).json({ error: 'Invalid credentials for this app' });
     const u = r.rows[0];
     if (!(await bcrypt.compare(password, u.password_hash))) return res.status(401).json({ error: 'Invalid' });
+    
     let responseRole = u.role;
     if (targetApp === 'doakhtyar') responseRole = toDoakhtyarRole(u.role);
     if (targetApp === 'petty_cash') responseRole = toPettyCashRole(u.role);
     if (targetApp === 'size_negar') responseRole = u.role;
     if (targetApp === 'highfit_crm') responseRole = toCrmRole(u.role);
+    // highfit_web از نقش پیش‌فرض (admin) استفاده می‌کند
+
     const token = jwt.sign({ 
       id: u.id, 
       role: responseRole, 
@@ -166,6 +173,7 @@ app.post('/api/login', async (req, res) => {
       assigned_schools: parseJsonArray(u.assigned_schools),
       assigned_products: parseJsonArray(u.assigned_products)
     }, process.env.JWT_SECRET || 'super-secret-key', { expiresIn: '1d' });
+    
     res.json({ 
       token, 
       user: { 
@@ -244,7 +252,7 @@ app.post('/api/users', auth, async (req, res) => {
   const { username, email, password, role, workshop_id, mobile, position, allowed_apps } = req.body;
   try {
     const hashed = await bcrypt.hash(password, 10);
-    const apps = parseJsonArray(allowed_apps).length ? parseJsonArray(allowed_apps) : ["doakhtyar", "petty_cash", "size_negar", "highfit_crm"];
+    const apps = parseJsonArray(allowed_apps).length ? parseJsonArray(allowed_apps) : ["doakhtyar", "petty_cash", "size_negar", "highfit_crm", "highfit_web"];
     const dbRole = toDbRole(role);
     const r = await pool.query('INSERT INTO users (username, email, password_hash, role, workshop_id, mobile, position, allowed_apps, app_name) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING id, username, email, role, mobile, position, allowed_apps', [username || email.split('@')[0], email, hashed, dbRole, workshop_id || null, mobile || null, position || null, JSON.stringify(apps), 'petty_cash']);
     res.status(201).json({ ...r.rows[0], role: toPettyCashRole(r.rows[0].role), allowed_apps: apps });
@@ -432,7 +440,7 @@ app.delete('/api/crm/users/:id', auth, async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// ===== Store عمومی =====
+// ===== Store عمومی (با پشتیبانی از اپ‌های مختلف) =====
 app.get('/api/store/:collection', auth, async (req, res) => {
   try {
     const collection = req.params.collection;
@@ -517,7 +525,6 @@ app.post('/api/public/register-request', async (req, res) => {
     const { fullName, email, mobile, position, schoolName, password } = req.body;
     if (!fullName || !email || !password) return res.status(400).json({ error: 'اطلاعات ناقص است' });
     
-    // بررسی وجود درخواست قبلی (برای جلوگیری از اسپم)
     const existing = await pool.query(
       `SELECT id FROM app_rows WHERE collection='crm_membership_requests' AND json->>'email' = $1 AND json->>'status' = 'pending'`, 
       [email]
