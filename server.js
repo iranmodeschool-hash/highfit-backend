@@ -188,7 +188,7 @@ app.post('/api/login', async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// ===== Store عمومی (برای همه اپ‌ها از جمله وب‌سایت) =====
+// ===== Store عمومی =====
 app.get('/api/store/:collection', auth, async (req, res) => {
   try {
     const collection = req.params.collection;
@@ -271,7 +271,7 @@ app.delete('/api/store/:collection/:id', auth, async (req, res) => {
   catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// ===== چت (آپدیت شده با پشتیبانی از صدا) =====
+// ===== چت =====
 app.post('/api/chat/send', auth, async (req, res) => {
   const { receiver_id, text, image, audio } = req.body;
   if (!receiver_id || (!text && !image && !audio)) return res.status(400).json({ error: 'Missing' });
@@ -348,5 +348,26 @@ app.put('/api/chat/messages/:messageId', auth, async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
+// ===== 🌐 مسیر تست برای اجرای دستی ربات هوش مصنوعی =====
+app.get('/api/test-ai-agent', async (req, res) => {
+  try {
+    const agent = require('./ai-agent.js');
+    await agent.generateAndPostArticle();
+    res.send('ربات با موفقیت اجرا شد! به سایت بروید و مقالات را چک کنید.');
+  } catch (err) {
+    res.status(500).send('خطا در اجرای ربات: ' + err.message);
+  }
+});
+
+// ===== راه‌اندازی سرور =====
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`Server on ${PORT}`));
+app.listen(PORT, () => {
+  console.log(`Server on ${PORT}`);
+  
+  // 🤖 فعال‌سازی ربات برای اجرای خودکار روزانه
+  try {
+    require('./ai-agent.js');
+  } catch (e) {
+    console.log('AI Agent not loaded:', e.message);
+  }
+});
