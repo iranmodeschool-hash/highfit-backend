@@ -3,6 +3,8 @@ const { Pool } = require('pg');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const cors = require('cors');
+const cron = require('node-cron'); // 👈 فقط یک بار تعریف شده
+const axios = require('axios');
 require('dotenv').config();
 
 // 🛡️ محافظ‌های سراسری
@@ -348,11 +350,71 @@ app.put('/api/chat/messages/:messageId', auth, async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// ===== 🌐 مسیر تست برای اجرای دستی ربات هوش مصنوعی =====
+// ===== 🌐 تابع تولید مقاله و مسیر تست =====
+async function generateAndPostArticle() {
+  console.log('🤖 ربات بیدار شد و شروع به کار کرد...');
+  try {
+    console.log('⏳ در حال لاگین به سایت...');
+    const loginRes = await axios.post(`https://www.highfit.ir/api/admin/login`, {
+      username: process.env.ADMIN_EMAIL, 
+      password: process.env.ADMIN_PASSWORD
+    });
+    const token = loginRes.data.token;
+    console.log('✅ لاگین موفق بود.');
+
+    console.log('🧠 هوش مصنوعی (GapGPT) در حال نوشتن مقاله است...');
+    const prompt = `یک مقاله ۵۰۰ کلمه‌ای درباره "پوشاک مدارس" بنویس. خروجی فقط JSON:
+    { "title": "عنوان", "summary": "خلاصه", "body": "<p>متن کامل با تگ‌های HTML</p>" }`;
+
+    const aiRes = await axios.post('https://api.gapgpt.app/v1/chat/completions', {
+      model: 'gpt-4o-mini',
+      messages: [{ role: 'user', content: prompt }],
+      temperature: 0.7,
+      response_format: { type: "json_object" }
+    }, {
+      headers: { 'Authorization': `Bearer ${process.env.AI_API_KEY}`, 'Content-Type': 'application/json' }
+    });
+
+    const article = JSON.parse(aiRes.data.choices[0].message.content);
+    console.log(`📝 موضوع مقاله: ${article.title}`);
+
+    console.log('🖼️ در حال دانلود عکس...');
+    const imageRes = await axios.get('https://picsum.photos/800/600', { responseType: 'arraybuffer' });
+    const imageBuffer = Buffer.from(imageRes.data, 'binary');
+    
+    console.log('☁️ در حال آپلود عکس به سایت...');
+    const uploadUrlRes = await axios.post(`https://www.highfit.ir/api/files/upload-url`, {
+      size: imageBuffer.length, contentType: 'image/jpeg', name: `ai-${Date.now()}.jpg` 
+    }, { headers: { 'x-admin-token': token } });
+    
+    const uploadData = uploadUrlRes.data;
+    await axios.put(uploadData.uploadUrl, imageBuffer, { headers: uploadData.headers });
+    
+    const commitRes = await axios.post(`https://www.highfit.ir/api/files/commit`, {
+      uploadId: uploadData.uploadId, name: `ai-${Date.now()}.jpg`
+    }, { headers: { 'x-admin-token': token } });
+    
+    const finalImageUrl = commitRes.data.url;
+    console.log('✅ عکس آپلود شد:', finalImageUrl);
+
+    console.log('🚀 در حال ارسال مقاله به سایت...');
+    await axios.post(`https://www.highfit.ir/api/admin/articles`, {
+      id: `ai-article-${Date.now()}`,
+      title: article.title, summary: article.summary, body: article.body,
+      image: finalImageUrl, date: new Date().toISOString()
+    }, { headers: { 'x-admin-token': token } });
+    
+    console.log('🎉 مقاله جدید با موفقیت در سایت منتشر شد!');
+  } catch (error) {
+    const errorMsg = error.response ? JSON.stringify(error.response.data) : error.message;
+    console.error('❌ خطا:', errorMsg);
+    throw new Error(errorMsg); 
+  }
+}
+
 app.get('/api/test-ai-agent', async (req, res) => {
   try {
-    const agent = require('./ai-agent.js');
-    await agent.generateAndPostArticle();
+    await generateAndPostArticle();
     res.send('ربات با موفقیت اجرا شد! به سایت بروید و مقالات را چک کنید.');
   } catch (err) {
     res.status(500).send('خطا در اجرای ربات: ' + err.message);
@@ -364,10 +426,7 @@ const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`Server on ${PORT}`);
   
-  // 🤖 فعال‌سازی ربات برای اجرای خودکار روزانه
-  try {
-    require('./ai-agent.js');
-  } catch (e) {
-    console.log('AI Agent not loaded:', e.message);
-  }
+  // 🤖 فعال‌سازی زمان‌بند روزانه (ساعت ۸ صبح)
+  cron.schedule('0 8 * * *', () => { generateAndPostArticle(); }, { timezone: "Asia/Tehran" });
+  console.log('⏳ ربات زمان‌بندی شد.');
 });
