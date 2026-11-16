@@ -9,7 +9,6 @@ async function generateAndPostArticle() {
   console.log('🤖 ربات بیدار شد و شروع به کار کرد...');
   
   try {
-    // ۱. لاگین به سایت
     console.log('⏳ در حال لاگین به سایت...');
     const loginRes = await fetch(`${API_BASE}/api/admin/login`, {
       method: 'POST',
@@ -21,8 +20,7 @@ async function generateAndPostArticle() {
     const token = loginData.token;
     console.log('✅ لاگین موفق بود.');
 
-    // ۲. نوشتن مقاله با هوش مصنوعی گوگل
-    console.log('🧠 هوش مصنوعی گوگل در حال نوشتن مقاله است...');
+    console.log('🧠 هوش مصنوعی در حال نوشتن مقاله است...');
     const prompt = `یک مقاله ۵۰۰ کلمه‌ای درباره "پوشاک مدارس" یا "فرم مدارس" بنویس. خروجی را دقیقاً به فرمت JSON زیر بده (بدون هیچ متن اضافه‌ای، فقط JSON):
     {
       "title": "عنوان جذاب مقاله",
@@ -34,7 +32,7 @@ async function generateAndPostArticle() {
       method: 'POST',
       headers: { 'Authorization': `Bearer ${AI_API_KEY}`, 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        model: 'gemini-1.5-flash',
+        model: 'gemini-2.0-flash', // 👈 مدل جدید و قدرتمند گوگل
         messages: [{ role: 'user', content: prompt }],
         temperature: 0.7,
         response_format: { type: "json_object" }
@@ -48,12 +46,10 @@ async function generateAndPostArticle() {
     const article = JSON.parse(text);
     console.log(`📝 موضوع مقاله: ${article.title}`);
 
-    // ۳. آماده‌سازی عکس
     console.log('🖼️ در حال گرفتن عکس...');
     const imageRes = await fetch('https://picsum.photos/800/600');
     const imageBuffer = Buffer.from(await imageRes.arrayBuffer());
     
-    // ۴. آپلود ۳ مرحله‌ای عکس
     console.log('☁️ در حال آپلود عکس...');
     const uploadUrlRes = await fetch(`${API_BASE}/api/files/upload-url`, {
       method: 'POST',
@@ -72,7 +68,6 @@ async function generateAndPostArticle() {
     const commitData = await commitRes.json();
     console.log('✅ عکس آپلود شد:', commitData.url);
 
-    // ۵. ثبت نهایی مقاله در سایت
     console.log('🚀 در حال ارسال مقاله به سایت...');
     const postRes = await fetch(`${API_BASE}/api/admin/articles`, {
       method: 'POST',
@@ -96,7 +91,6 @@ async function generateAndPostArticle() {
   }
 }
 
-// زمان‌بندی: هر روز ساعت ۸ صبح
 cron.schedule('0 8 * * *', () => {
   generateAndPostArticle();
 }, { timezone: "Asia/Tehran" });
