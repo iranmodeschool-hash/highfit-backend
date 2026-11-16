@@ -3,7 +3,7 @@ const { Pool } = require('pg');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const cors = require('cors');
-const cron = require('node-cron'); // 👈 فقط یک بار تعریف شده
+const cron = require('node-cron'); 
 const axios = require('axios');
 require('dotenv').config();
 
@@ -350,7 +350,7 @@ app.put('/api/chat/messages/:messageId', auth, async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// ===== 🌐 تابع تولید مقاله و مسیر تست =====
+// ===== 🌐 تابع تولید مقاله و مسیر تست (بدون نیاز به فایل جداگانه) =====
 async function generateAndPostArticle() {
   console.log('🤖 ربات بیدار شد و شروع به کار کرد...');
   try {
