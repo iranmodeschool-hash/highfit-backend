@@ -1,4 +1,5 @@
 const cron = require('node-cron');
+const axios = require('axios');
 
 const API_BASE = 'https://www.highfit.ir';
 const ADMIN_EMAIL = process.env.ADMIN_EMAIL;
@@ -6,95 +7,84 @@ const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD;
 const AI_API_KEY = process.env.AI_API_KEY;
 
 async function generateAndPostArticle() {
-  console.log('🤖 ربات بیدار شد و شروع به کار کرد...');
+  console.log('🤖 [مرحله ۱] ربات بیدار شد...');
   
   try {
+    // ۱. لاگین
     console.log('⏳ در حال لاگین به سایت...');
-    const loginRes = await fetch(`${API_BASE}/api/admin/login`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ username: ADMIN_EMAIL, password: ADMIN_PASSWORD })
+    const loginRes = await axios.post(`${API_BASE}/api/admin/login`, {
+      username: ADMIN_EMAIL, password: ADMIN_PASSWORD
     });
-    const loginData = await loginRes.json();
-    if (!loginRes.ok) throw new Error('لاگین نشد: ' + JSON.stringify(loginData));
-    const token = loginData.token;
+    const token = loginRes.data.token;
     console.log('✅ لاگین موفق بود.');
 
-    console.log('🧠 هوش مصنوعی در حال نوشتن مقاله است...');
-    const prompt = `یک مقاله ۵۰۰ کلمه‌ای درباره "پوشاک مدارس" یا "فرم مدارس" بنویس. خروجی را دقیقاً به فرمت JSON زیر بده (بدون هیچ متن اضافه‌ای، فقط JSON):
-    {
-      "title": "عنوان جذاب مقاله",
-      "summary": "یک خلاصه ۲ جمله‌ای",
-      "body": "<p>متن کامل مقاله با تگ‌های HTML مثل h2 و p</p>"
-    }`;
+    // ۲. تماس با هوش مصنوعی
+    console.log('🧠 [مرحله ۲] در حال تماس با گوگل...');
+    const prompt = `یک مقاله ۵۰۰ کلمه‌ای درباره "پوشاک مدارس" بنویس. خروجی فقط JSON:
+    { "title": "عنوان", "summary": "خلاصه", "body": "<p>متن</p>" }`;
 
-    const aiRes = await fetch('https://generativelanguage.googleapis.com/v1beta/openai/chat/completions', {
-      method: 'POST',
-      headers: { 'Authorization': `Bearer ${AI_API_KEY}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        model: 'gemini-2.0-flash', // 👈 مدل جدید و قدرتمند گوگل
+    let aiData;
+    try {
+      const aiRes = await axios.post('https://generativelanguage.googleapis.com/v1beta/openai/chat/completions', {
+        model: 'gemini-2.0-flash',
         messages: [{ role: 'user', content: prompt }],
         temperature: 0.7,
         response_format: { type: "json_object" }
-      })
-    });
-    
-    const aiData = await aiRes.json();
-    if (!aiRes.ok) throw new Error('هوش مصنوعی جواب نداد: ' + JSON.stringify(aiData));
-    
-    const text = aiData.choices[0].message.content;
-    const article = JSON.parse(text);
+      }, {
+        headers: { 'Authorization': `Bearer ${AI_API_KEY}`, 'Content-Type': 'application/json' }
+      });
+      aiData = aiRes.data;
+    } catch (aiError) {
+      console.error('❌ خطا در تماس با گوگل:', aiError.response ? JSON.stringify(aiError.response.data) : aiError.message);
+      throw new Error('تماس با هوش مصنوعی برقرار نشد.');
+    }
+
+    const article = JSON.parse(aiData.choices[0].message.content);
     console.log(`📝 موضوع مقاله: ${article.title}`);
 
-    console.log('🖼️ در حال گرفتن عکس...');
-    const imageRes = await fetch('https://picsum.photos/800/600');
-    const imageBuffer = Buffer.from(await imageRes.arrayBuffer());
+    // ۳. گرفتن عکس
+    console.log('🖼️ [مرحله ۳] در حال دانلود عکس...');
+    let imageBuffer;
+    try {
+      const imageRes = await axios.get('https://picsum.photos/800/600', { responseType: 'arraybuffer' });
+      imageBuffer = Buffer.from(imageRes.data, 'binary');
+    } catch (imgError) {
+      console.error('❌ خطا در دانلود عکس:', imgError.message);
+      throw new Error('دانلود عکس انجام نشد.');
+    }
     
-    console.log('☁️ در حال آپلود عکس...');
-    const uploadUrlRes = await fetch(`${API_BASE}/api/files/upload-url`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'x-admin-token': token },
-      body: JSON.stringify({ size: imageBuffer.length, contentType: 'image/jpeg', name: `ai-${Date.now()}.jpg` })
-    });
-    const uploadData = await uploadUrlRes.json();
+    // ۴. آپلود عکس
+    console.log('☁️ [مرحله ۴] در حال آپلود عکس به سایت...');
+    const uploadUrlRes = await axios.post(`${API_BASE}/api/files/upload-url`, {
+      size: imageBuffer.length, contentType: 'image/jpeg', name: `ai-${Date.now()}.jpg` 
+    }, { headers: { 'x-admin-token': token } });
     
-    await fetch(uploadData.uploadUrl, { method: 'PUT', headers: uploadData.headers, body: imageBuffer });
+    const uploadData = uploadUrlRes.data;
+    await axios.put(uploadData.uploadUrl, imageBuffer, { headers: uploadData.headers });
     
-    const commitRes = await fetch(`${API_BASE}/api/files/commit`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'x-admin-token': token },
-      body: JSON.stringify({ uploadId: uploadData.uploadId, name: `ai-${Date.now()}.jpg` })
-    });
-    const commitData = await commitRes.json();
-    console.log('✅ عکس آپلود شد:', commitData.url);
+    const commitRes = await axios.post(`${API_BASE}/api/files/commit`, {
+      uploadId: uploadData.uploadId, name: `ai-${Date.now()}.jpg`
+    }, { headers: { 'x-admin-token': token } });
+    
+    const finalImageUrl = commitRes.data.url;
+    console.log('✅ عکس آپلود شد:', finalImageUrl);
 
-    console.log('🚀 در حال ارسال مقاله به سایت...');
-    const postRes = await fetch(`${API_BASE}/api/admin/articles`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'x-admin-token': token },
-      body: JSON.stringify({
-        id: `ai-article-${Date.now()}`,
-        title: article.title,
-        summary: article.summary,
-        body: article.body,
-        image: commitData.url,
-        date: new Date().toISOString()
-      })
-    });
+    // ۵. ثبت مقاله
+    console.log('🚀 [مرحله ۵] در حال ثبت مقاله در سایت...');
+    await axios.post(`${API_BASE}/api/admin/articles`, {
+      id: `ai-article-${Date.now()}`,
+      title: article.title, summary: article.summary, body: article.body,
+      image: finalImageUrl, date: new Date().toISOString()
+    }, { headers: { 'x-admin-token': token } });
     
-    if (!postRes.ok) throw new Error('ثبت مقاله در سایت انجام نشد.');
     console.log('🎉 مقاله جدید با موفقیت در سایت منتشر شد!');
 
   } catch (error) {
-    console.error('❌ خطا:', error.message);
+    console.error('❌ خطای کلی:', error.message);
     throw new Error(error.message); 
   }
 }
 
-cron.schedule('0 8 * * *', () => {
-  generateAndPostArticle();
-}, { timezone: "Asia/Tehran" });
-
-console.log('⏳ ربات فعال شد و هر روز ساعت ۸ صبح کار می‌کند.');
-
+cron.schedule('0 8 * * *', () => { generateAndPostArticle(); }, { timezone: "Asia/Tehran" });
+console.log('⏳ ربات فعال شد.');
 module.exports = { generateAndPostArticle };
