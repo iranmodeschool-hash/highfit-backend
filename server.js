@@ -128,7 +128,7 @@ const toCrmRole = (dbRole) => {
 
 app.get('/', (req, res) => res.send('HighFit Backend is running perfectly!'));
 
-// 🚀 راه‌اندازی ادمین اولیه
+// 🚀 راه‌اندازی ادمین اولیه (آپدیت شده برای 5 اپ)
 app.get('/api/force-create-admin', async (req, res) => {
   const { email, password } = req.query;
   try {
@@ -185,6 +185,254 @@ app.post('/api/login', async (req, res) => {
         allowed_apps: parseJsonArray(u.allowed_apps) 
       } 
     });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// ===== مدیریت کاربران (دوختیار) =====
+app.get('/api/admin/users', auth, async (req, res) => {
+  if (req.user.role !== 'admin' && req.user.role !== 'super_admin') return res.status(403).json({ error: 'Admin only' });
+  try {
+    const r = await pool.query('SELECT id, username, email, role, workshop_id, mobile, position, assigned_schools, assigned_products, allowed_apps, created_at FROM users WHERE app_name = $1 ORDER BY id DESC', ['doakhtyar']);
+    res.json(r.rows.map(u => ({ ...u, role: toDoakhtyarRole(u.role), allowed_apps: parseJsonArray(u.allowed_apps), assigned_schools: parseJsonArray(u.assigned_schools), assigned_products: parseJsonArray(u.assigned_products) })));
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.post('/api/admin/users', auth, async (req, res) => {
+  if (req.user.role !== 'admin' && req.user.role !== 'super_admin') return res.status(403).json({ error: 'Admin only' });
+  const { username, email, password, role, workshop_id, mobile, position, allowed_apps } = req.body;
+  try {
+    const hashed = await bcrypt.hash(password, 10);
+    const apps = parseJsonArray(allowed_apps).length ? parseJsonArray(allowed_apps) : ["doakhtyar"];
+    const dbRole = toDbRole(role);
+    const r = await pool.query('INSERT INTO users (username, email, password_hash, role, workshop_id, mobile, position, allowed_apps, app_name) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING id, username, email, role, workshop_id, mobile, position, allowed_apps', [username, email, hashed, dbRole, workshop_id || null, mobile || null, position || null, JSON.stringify(apps), 'doakhtyar']);
+    res.status(201).json({ ...r.rows[0], role: toDoakhtyarRole(r.rows[0].role), allowed_apps: apps });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.put('/api/admin/users/:id', auth, async (req, res) => {
+  if (req.user.role !== 'admin' && req.user.role !== 'super_admin') return res.status(403).json({ error: 'Admin only' });
+  const { username, email, role, workshop_id, mobile, position, allowed_apps } = req.body;
+  try {
+    const existing = await pool.query('SELECT * FROM users WHERE id=$1 AND app_name=$2', [req.params.id, 'doakhtyar']);
+    if (!existing.rows.length) return res.status(404).json({ error: 'User not found' });
+    const u = existing.rows[0];
+    const finalUsername = username !== undefined ? username : u.username;
+    const finalEmail = email !== undefined ? email : u.email;
+    const dbRole = role !== undefined ? toDbRole(role) : u.role;
+    const finalWorkshopId = workshop_id !== undefined ? workshop_id : u.workshop_id;
+    const finalMobile = mobile !== undefined ? mobile : u.mobile;
+    const finalPosition = position !== undefined ? position : u.position;
+    const finalApps = JSON.stringify(parseJsonArray(allowed_apps !== undefined ? allowed_apps : u.allowed_apps));
+    await pool.query('UPDATE users SET username=$1, email=$2, role=$3, workshop_id=$4, mobile=$5, position=$6, allowed_apps=$7 WHERE id=$8 AND app_name=$9', [finalUsername, finalEmail, dbRole, finalWorkshopId, finalMobile, finalPosition, finalApps, req.params.id, 'doakhtyar']);
+    res.json({ message: 'Updated' });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.delete('/api/admin/users/:id', auth, async (req, res) => {
+  if (req.user.role !== 'admin' && req.user.role !== 'super_admin') return res.status(403).json({ error: 'Admin only' });
+  await pool.query('DELETE FROM users WHERE id=$1 AND app_name=$2', [req.params.id, 'doakhtyar']);
+  res.json({ message: 'Deleted' });
+});
+
+// ===== مدیریت کاربران (تنخواه‌یار) =====
+app.get('/api/users', auth, async (req, res) => {
+  if (req.user.role !== 'admin' && req.user.role !== 'super_admin') return res.status(403).json({ error: 'Admin only' });
+  try {
+    const r = await pool.query('SELECT id, username, email, role, workshop_id, mobile, position, allowed_apps, created_at FROM users WHERE app_name = $1 ORDER BY id DESC', ['petty_cash']);
+    res.json(r.rows.map(u => ({ ...u, role: toPettyCashRole(u.role), allowed_apps: parseJsonArray(u.allowed_apps) })));
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.post('/api/users', auth, async (req, res) => {
+  if (req.user.role !== 'admin' && req.user.role !== 'super_admin') return res.status(403).json({ error: 'Admin only' });
+  const { username, email, password, role, workshop_id, mobile, position, allowed_apps } = req.body;
+  try {
+    const hashed = await bcrypt.hash(password, 10);
+    const apps = parseJsonArray(allowed_apps).length ? parseJsonArray(allowed_apps) : ["doakhtyar", "petty_cash", "size_negar", "highfit_crm", "highfit_web"];
+    const dbRole = toDbRole(role);
+    const r = await pool.query('INSERT INTO users (username, email, password_hash, role, workshop_id, mobile, position, allowed_apps, app_name) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING id, username, email, role, mobile, position, allowed_apps', [username || email.split('@')[0], email, hashed, dbRole, workshop_id || null, mobile || null, position || null, JSON.stringify(apps), 'petty_cash']);
+    res.status(201).json({ ...r.rows[0], role: toPettyCashRole(r.rows[0].role), allowed_apps: apps });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.put('/api/users/:id', auth, async (req, res) => {
+  if (req.user.role !== 'admin' && req.user.role !== 'super_admin') return res.status(403).json({ error: 'Admin only' });
+  const { username, email, role, workshop_id, password, mobile, position, allowed_apps } = req.body;
+  try {
+    const existing = await pool.query('SELECT * FROM users WHERE id=$1 AND app_name=$2', [req.params.id, 'petty_cash']);
+    if (!existing.rows.length) return res.status(404).json({ error: 'User not found' });
+    const u = existing.rows[0];
+    const finalUsername = username !== undefined ? username : u.username;
+    const finalEmail = email !== undefined ? email : u.email;
+    const dbRole = role !== undefined ? toDbRole(role) : u.role;
+    const finalWorkshopId = workshop_id !== undefined ? workshop_id : u.workshop_id;
+    const finalMobile = mobile !== undefined ? mobile : u.mobile;
+    const finalPosition = position !== undefined ? position : u.position;
+    const finalApps = JSON.stringify(parseJsonArray(allowed_apps !== undefined ? allowed_apps : u.allowed_apps));
+    if (password && password.trim() !== '') {
+      const hashed = await bcrypt.hash(password, 10);
+      await pool.query('UPDATE users SET username=$1, email=$2, role=$3, workshop_id=$4, mobile=$5, position=$6, allowed_apps=$7, password_hash=$8 WHERE id=$9 AND app_name=$10', [finalUsername, finalEmail, dbRole, finalWorkshopId, finalMobile, finalPosition, finalApps, hashed, req.params.id, 'petty_cash']);
+    } else {
+      await pool.query('UPDATE users SET username=$1, email=$2, role=$3, workshop_id=$4, mobile=$5, position=$6, allowed_apps=$7 WHERE id=$8 AND app_name=$9', [finalUsername, finalEmail, dbRole, finalWorkshopId, finalMobile, finalPosition, finalApps, req.params.id, 'petty_cash']);
+    }
+    res.json({ message: 'Updated' });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.delete('/api/users/:id', auth, async (req, res) => {
+  if (req.user.role !== 'admin' && req.user.role !== 'super_admin') return res.status(403).json({ error: 'Admin only' });
+  try {
+    await pool.query('DELETE FROM users WHERE id=$1 AND app_name=$2', [req.params.id, 'petty_cash']);
+    res.json({ message: 'Deleted' });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// ===== مدیریت کاربران (سایز نگار) =====
+app.get('/api/size-negar/users', auth, async (req, res) => {
+  if (req.user.role !== 'admin' && req.user.role !== 'super_admin') return res.status(403).json({ error: 'Admin only' });
+  try {
+    const r = await pool.query('SELECT id, username, email, role, workshop_id, mobile, position, assigned_schools, assigned_products, allowed_apps, created_at FROM users WHERE app_name = $1 ORDER BY id DESC', ['size_negar']);
+    res.json(r.rows.map(u => ({ 
+      ...u, 
+      allowed_apps: parseJsonArray(u.allowed_apps),
+      assigned_schools: parseJsonArray(u.assigned_schools),
+      assigned_products: parseJsonArray(u.assigned_products)
+    })));
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.post('/api/size-negar/users', auth, async (req, res) => {
+  if (req.user.role !== 'admin' && req.user.role !== 'super_admin') return res.status(403).json({ error: 'Admin only' });
+  const { username, email, password, role, workshop_id, mobile, position, assigned_schools, assigned_products, allowed_apps } = req.body;
+  try {
+    const hashed = await bcrypt.hash(password, 10);
+    const apps = parseJsonArray(allowed_apps).length ? parseJsonArray(allowed_apps) : ["size_negar"];
+    const schools = parseJsonArray(assigned_schools);
+    const products = parseJsonArray(assigned_products);
+    const r = await pool.query(
+      'INSERT INTO users (username, email, password_hash, role, workshop_id, mobile, position, assigned_schools, assigned_products, allowed_apps, app_name) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) RETURNING id, username, email, role, workshop_id, mobile, position, assigned_schools, assigned_products, allowed_apps', 
+      [username || email.split('@')[0], email, hashed, role || 'measurer', workshop_id || null, mobile || null, position || null, JSON.stringify(schools), JSON.stringify(products), JSON.stringify(apps), 'size_negar']
+    );
+    res.status(201).json({ 
+      ...r.rows[0], 
+      allowed_apps: apps,
+      assigned_schools: schools,
+      assigned_products: products
+    });
+  } catch (err) { 
+    if (err.code === '23505') return res.status(400).json({ error: 'این ایمیل یا نام کاربری قبلا در سایز نگار ثبت شده است.' });
+    res.status(500).json({ error: err.message }); 
+  }
+});
+
+app.put('/api/size-negar/users/:id', auth, async (req, res) => {
+  if (req.user.role !== 'admin' && req.user.role !== 'super_admin') return res.status(403).json({ error: 'Admin only' });
+  const { username, email, role, workshop_id, password, mobile, position, assigned_schools, assigned_products, allowed_apps } = req.body;
+  try {
+    const existing = await pool.query('SELECT * FROM users WHERE id=$1 AND app_name=$2', [req.params.id, 'size_negar']);
+    if (!existing.rows.length) return res.status(404).json({ error: 'User not found' });
+    const u = existing.rows[0];
+    const finalUsername = username !== undefined ? username : u.username;
+    const finalEmail = email !== undefined ? email : u.email;
+    const finalRole = role !== undefined ? role : u.role;
+    const finalWorkshopId = workshop_id !== undefined ? workshop_id : u.workshop_id;
+    const finalMobile = mobile !== undefined ? mobile : u.mobile;
+    const finalPosition = position !== undefined ? position : u.position;
+    const finalApps = JSON.stringify(parseJsonArray(allowed_apps !== undefined ? allowed_apps : u.allowed_apps));
+    const finalSchools = JSON.stringify(parseJsonArray(assigned_schools !== undefined ? assigned_schools : u.assigned_schools));
+    const finalProducts = JSON.stringify(parseJsonArray(assigned_products !== undefined ? assigned_products : u.assigned_products));
+    
+    if (password && password.trim() !== '') {
+      const hashed = await bcrypt.hash(password, 10);
+      await pool.query('UPDATE users SET username=$1, email=$2, role=$3, workshop_id=$4, mobile=$5, position=$6, assigned_schools=$7, assigned_products=$8, allowed_apps=$9, password_hash=$10 WHERE id=$11 AND app_name=$12', 
+        [finalUsername, finalEmail, finalRole, finalWorkshopId, finalMobile, finalPosition, finalSchools, finalProducts, finalApps, hashed, req.params.id, 'size_negar']);
+    } else {
+      await pool.query('UPDATE users SET username=$1, email=$2, role=$3, workshop_id=$4, mobile=$5, position=$6, assigned_schools=$7, assigned_products=$8, allowed_apps=$9 WHERE id=$10 AND app_name=$11', 
+        [finalUsername, finalEmail, finalRole, finalWorkshopId, finalMobile, finalPosition, finalSchools, finalProducts, finalApps, req.params.id, 'size_negar']);
+    }
+    res.json({ message: 'Updated' });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.delete('/api/size-negar/users/:id', auth, async (req, res) => {
+  if (req.user.role !== 'admin' && req.user.role !== 'super_admin') return res.status(403).json({ error: 'Admin only' });
+  try {
+    await pool.query('DELETE FROM users WHERE id=$1 AND app_name=$2', [req.params.id, 'size_negar']);
+    res.json({ message: 'Deleted' });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// ===== مدیریت کاربران (High Fit CRM) =====
+app.get('/api/crm/users', auth, async (req, res) => {
+  if (req.user.role !== 'admin' && req.user.role !== 'super_admin') return res.status(403).json({ error: 'Admin only' });
+  try {
+    const r = await pool.query('SELECT id, username, email, role, workshop_id, mobile, position, assigned_schools, allowed_apps, created_at FROM users WHERE app_name = $1 ORDER BY id DESC', ['highfit_crm']);
+    res.json(r.rows.map(u => ({ 
+      ...u, 
+      role: toCrmRole(u.role),
+      assigned_schools: parseJsonArray(u.assigned_schools),
+      allowed_apps: parseJsonArray(u.allowed_apps)
+    })));
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.post('/api/crm/users', auth, async (req, res) => {
+  if (req.user.role !== 'admin' && req.user.role !== 'super_admin') return res.status(403).json({ error: 'Admin only' });
+  const { username, email, password, role, workshop_id, mobile, position, assigned_schools, allowed_apps } = req.body;
+  try {
+    const hashed = await bcrypt.hash(password, 10);
+    const apps = parseJsonArray(allowed_apps).length ? parseJsonArray(allowed_apps) : ["highfit_crm"];
+    const finalRole = (role === 'admin') ? 'admin' : 'sales';
+    const schools = parseJsonArray(assigned_schools);
+    const r = await pool.query(
+      'INSERT INTO users (username, email, password_hash, role, workshop_id, mobile, position, assigned_schools, allowed_apps, app_name) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING id, username, email, role, mobile, position, assigned_schools, allowed_apps', 
+      [username || email.split('@')[0], email, hashed, finalRole, workshop_id || null, mobile || null, position || null, JSON.stringify(schools), JSON.stringify(apps), 'highfit_crm']
+    );
+    res.status(201).json({ 
+      ...r.rows[0], 
+      role: toCrmRole(r.rows[0].role), 
+      allowed_apps: apps,
+      assigned_schools: schools
+    });
+  } catch (err) { 
+    if (err.code === '23505') return res.status(400).json({ error: 'این ایمیل یا نام کاربری قبلا در CRM ثبت شده است.' });
+    res.status(500).json({ error: err.message }); 
+  }
+});
+
+app.put('/api/crm/users/:id', auth, async (req, res) => {
+  if (req.user.role !== 'admin' && req.user.role !== 'super_admin') return res.status(403).json({ error: 'Admin only' });
+  const { username, email, role, workshop_id, password, mobile, position, assigned_schools, allowed_apps } = req.body;
+  try {
+    const existing = await pool.query('SELECT * FROM users WHERE id=$1 AND app_name=$2', [req.params.id, 'highfit_crm']);
+    if (!existing.rows.length) return res.status(404).json({ error: 'User not found' });
+    const u = existing.rows[0];
+    const finalUsername = username !== undefined ? username : u.username;
+    const finalEmail = email !== undefined ? email : u.email;
+    const finalRole = role !== undefined ? ((role === 'admin') ? 'admin' : 'sales') : u.role;
+    const finalWorkshopId = workshop_id !== undefined ? workshop_id : u.workshop_id;
+    const finalMobile = mobile !== undefined ? mobile : u.mobile;
+    const finalPosition = position !== undefined ? position : u.position;
+    const finalApps = JSON.stringify(parseJsonArray(allowed_apps !== undefined ? allowed_apps : u.allowed_apps));
+    const finalSchools = JSON.stringify(parseJsonArray(assigned_schools !== undefined ? assigned_schools : u.assigned_schools));
+    
+    if (password && password.trim() !== '') {
+      const hashed = await bcrypt.hash(password, 10);
+      await pool.query('UPDATE users SET username=$1, email=$2, role=$3, workshop_id=$4, mobile=$5, position=$6, assigned_schools=$7, allowed_apps=$8, password_hash=$9 WHERE id=$10 AND app_name=$11', 
+        [finalUsername, finalEmail, finalRole, finalWorkshopId, finalMobile, finalPosition, finalSchools, finalApps, hashed, req.params.id, 'highfit_crm']);
+    } else {
+      await pool.query('UPDATE users SET username=$1, email=$2, role=$3, workshop_id=$4, mobile=$5, position=$6, assigned_schools=$7, allowed_apps=$8 WHERE id=$9 AND app_name=$10', 
+        [finalUsername, finalEmail, finalRole, finalWorkshopId, finalMobile, finalPosition, finalSchools, finalApps, req.params.id, 'highfit_crm']);
+    }
+    res.json({ message: 'Updated' });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.delete('/api/crm/users/:id', auth, async (req, res) => {
+  if (req.user.role !== 'admin' && req.user.role !== 'super_admin') return res.status(403).json({ error: 'Admin only' });
+  try {
+    await pool.query('DELETE FROM users WHERE id=$1 AND app_name=$2', [req.params.id, 'highfit_crm']);
+    res.json({ message: 'Deleted' });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
@@ -266,9 +514,139 @@ app.post('/api/store/:collection', auth, async (req, res) => {
   }
 });
 
+// مسیر عمومی ثبت درخواست عضویت (بدون نیاز به لاگین)
+app.post('/api/public/register-request', async (req, res) => {
+  try {
+    const { fullName, email, mobile, position, schoolName, password } = req.body;
+    if (!fullName || !email || !password) return res.status(400).json({ error: 'اطلاعات ناقص است' });
+    
+    const existing = await pool.query(
+      `SELECT id FROM app_rows WHERE collection='crm_membership_requests' AND json->>'email' = $1 AND json->>'status' = 'pending'`, 
+      [email]
+    );
+    if (existing.rows.length > 0) return res.status(400).json({ error: 'درخواست قبلی برای این ایمیل در انتظار بررسی است' });
+
+    const id = 'req_' + Date.now() + '_' + Math.random().toString(36).substring(7);
+    const data = { id, fullName, email, mobile, position, schoolName, password, status: 'pending', createdAt: new Date().toISOString() };
+    
+    await pool.query('INSERT INTO app_rows (id, collection, json) VALUES ($1,$2,$3)', [id, 'crm_membership_requests', JSON.stringify(data)]);
+    res.status(201).json({ message: 'Request submitted successfully', id });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.delete('/api/store/:collection/bulk', auth, async (req, res) => {
+  try {
+    const collection = req.params.collection;
+    const { school } = req.query;
+    
+    if (!school) return res.status(400).json({ error: 'نام مدرسه یا ALL الزامی است.' });
+    if (req.user.role !== 'admin' && req.user.role !== 'super_admin') return res.status(403).json({ error: 'فقط مدیر کل مجاز است.' });
+
+    if (school === 'ALL') {
+      await pool.query(`DELETE FROM app_rows WHERE collection=$1`, [collection]);
+    } else {
+      await pool.query(`DELETE FROM app_rows WHERE collection=$1 AND (json->>'school' = $2 OR json->>'workshop_id' = $2)`, [collection, school]);
+    }
+    
+    res.json({ message: 'Bulk delete successful' });
+  } catch (err) { 
+    console.error("Bulk Delete Error:", err);
+    res.status(500).json({ error: err.message }); 
+  }
+});
+
 app.delete('/api/store/:collection/:id', auth, async (req, res) => {
   try { await pool.query('DELETE FROM app_rows WHERE id=$1', [req.params.id]); res.json({ message: 'Deleted' }); }
   catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// ===== تنظیمات (لینک بروزرسانی) =====
+app.post('/api/settings/update-link', auth, async (req, res) => {
+  try {
+    const { url, app_name } = req.body;
+    if (!url || !app_name) return res.status(400).json({ error: 'URL و app_name الزامی هستند.' });
+    
+    const id = `update_link_${app_name}`;
+    await pool.query(
+      'INSERT INTO app_rows (id, collection, json) VALUES ($1,$2,$3) ON CONFLICT (id) DO UPDATE SET json=EXCLUDED.json',
+      [id, 'app_settings', JSON.stringify({ id, url, app_name, updated_at: new Date().toISOString() })]
+    );
+    
+    res.json({ message: 'Saved', url });
+  } catch (err) {
+    console.error("Save Update Link Error:", err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get('/api/settings/update-link/:app_name', auth, async (req, res) => {
+  try {
+    const { app_name } = req.params;
+    const id = `update_link_${app_name}`;
+    const r = await pool.query('SELECT json FROM app_rows WHERE id=$1', [id]);
+    if (!r.rows.length) return res.json({ url: null });
+    const data = safeParse(r.rows[0].json);
+    res.json({ url: data.url || null });
+  } catch (err) {
+    console.error("Get Update Link Error:", err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ===== 🔔 اعلان‌ها (خلاصه برای Badge) =====
+app.get('/api/notifications/summary', auth, async (req, res) => {
+  try {
+    const myId = String(req.user.id);
+    const appName = req.user.app_name;
+    
+    const msgResult = await pool.query(
+      `SELECT COUNT(*) FROM app_rows m
+       WHERE m.collection='messages' 
+       AND m.json->>'receiver_id' = $1 
+       AND m.json->>'status' != 'seen'
+       AND EXISTS (
+         SELECT 1 FROM users u 
+         WHERE u.id::text = m.json->>'sender_id' 
+         AND u.app_name = $2
+       )`,
+      [myId, appName]
+    );
+    const chatUnread = parseInt(msgResult.rows[0].count) || 0;
+    
+    let pendingCount = 0;
+    
+    if (appName === 'size_negar' && (req.user.role === 'admin' || req.user.role === 'supervisor')) {
+      const r = await pool.query(`SELECT COUNT(*) FROM app_rows WHERE collection='size_negar_orders' AND json->>'status' = 'pending'`);
+      pendingCount = parseInt(r.rows[0].count) || 0;
+    } else if (appName === 'petty_cash' && (req.user.role === 'admin' || req.user.role === 'financial_manager')) {
+      const r = await pool.query(`SELECT COUNT(*) FROM app_rows WHERE collection='petty_cash_payments' AND json->>'status' = 'pending'`);
+      pendingCount = parseInt(r.rows[0].count) || 0;
+    }
+    
+    res.json({ chatUnread, pendingCount, total: chatUnread + pendingCount });
+  } catch (err) { 
+    console.error("Notification Summary Error:", err);
+    res.status(500).json({ error: err.message }); 
+  }
+});
+
+// ===== آمار داشبورد =====
+app.get('/api/dashboard/stats', auth, async (req, res) => {
+  let response = { users: 0, workshops: 0, products: 0, dispatches: 0, deliveries: 0, defects: 0, total_wage: 0 };
+  try {
+    const isAdmin = req.user.role === 'admin' || req.user.role === 'super_admin';
+    const wid = req.user.workshop_id;
+    const filter = !isAdmin && wid ? ` AND (json->>'workshop_id' = '${wid}' OR json->>'workshopId' = '${wid}')` : '';
+    if (isAdmin) { const u = await pool.query('SELECT COUNT(*) FROM users WHERE app_name=$1', [req.user.app_name]); response.users = parseInt(u.rows[0].count) || 0; }
+    const w = await pool.query(`SELECT COUNT(*) FROM app_rows WHERE collection='workshops'${filter}`); response.workshops = parseInt(w.rows[0].count) || 0;
+    const p = await pool.query(`SELECT COUNT(*) FROM app_rows WHERE collection='products'${filter}`); response.products = parseInt(p.rows[0].count) || 0;
+    const d = await pool.query(`SELECT COUNT(*) FROM app_rows WHERE collection='dispatches'${filter}`); response.dispatches = parseInt(d.rows[0].count) || 0;
+    const dl = await pool.query(`SELECT COUNT(*) FROM app_rows WHERE collection='sewing_deliveries'${filter}`); response.deliveries = parseInt(dl.rows[0].count) || 0;
+    const df = await pool.query(`SELECT COUNT(*) FROM app_rows WHERE collection='cut_defects'${filter}`); response.defects = parseInt(df.rows[0].count) || 0;
+  } catch (err) { console.error("Dashboard Stats Error:", err); }
+  res.json(response);
 });
 
 // ===== چت =====
@@ -348,8 +726,31 @@ app.put('/api/chat/messages/:messageId', auth, async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// ===== راه‌اندازی سرور =====
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
-  console.log(`Server on ${PORT}`);
+app.get('/api/chat/contacts', auth, async (req, res) => {
+  try {
+    const targetApp = req.user.app_name || 'doakhtyar';
+    let q = 'SELECT id, username, role, workshop_id FROM users WHERE app_name=$1', p = [targetApp]; 
+    if (req.user.role !== 'admin' && req.user.role !== 'super_admin') { q += ' AND role=$2'; p.push('admin'); } 
+    const r = await pool.query(q, p); 
+    res.json(r.rows.map(u => ({ ...u, role: targetApp === 'doakhtyar' ? toDoakhtyarRole(u.role) : targetApp === 'highfit_crm' ? toCrmRole(u.role) : toPettyCashRole(u.role) })));
+  } catch (err) { res.status(500).json({ error: err.message }); }
 });
+
+// ===== Reset =====
+app.delete('/api/admin/reset-workshop/:workshopId', auth, async (req, res) => {
+  if (req.user.role !== 'admin' && req.user.role !== 'super_admin') return res.status(403).json({ error: 'Admin only' }); const wid = req.params.workshopId; const cols = ['dispatches','sewing_deliveries','wage_ledger','payments'];
+  try {
+    const dR = await pool.query(`SELECT id FROM app_rows WHERE collection='dispatches' AND (json->>'workshop_id'=$1 OR json->>'workshopId'=$1)`, [wid]); const dIds = dR.rows.map(r => r.id);
+    const sR = await pool.query(`SELECT id FROM app_rows WHERE collection='sewing_deliveries' AND (json->>'workshop_id'=$1 OR json->>'workshopId'=$1)`, [wid]); const sIds = sR.rows.map(r => r.id);
+    if (dIds.length) await pool.query(`DELETE FROM app_rows WHERE collection IN ('dispatch_lines','workshop_receipts','cut_defects','dispatch_size_qty') AND (json->>'dispatch_id'=ANY($1) OR json->>'dispatchId'=ANY($1))`, [dIds]);
+    if (sIds.length) await pool.query(`DELETE FROM app_rows WHERE collection IN ('sewing_delivery_lines') AND (json->>'delivery_id'=ANY($1) OR json->>'deliveryId'=ANY($1))`, [sIds]);
+    await pool.query(`DELETE FROM app_rows WHERE collection=ANY($1) AND (json->>'workshop_id'=$2 OR json->>'workshopId'=$2)`, [cols, wid]); res.json({ message: 'Reset complete' });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.delete('/api/admin/clear-all-transactions', auth, async (req, res) => {
+  if (req.user.role !== 'admin' && req.user.role !== 'super_admin') return res.status(403).json({ error: 'Admin only' }); const cols = ['dispatches','dispatch_lines','dispatch_size_qty','workshop_receipts','workshop_receipt_lines','sewing_deliveries','sewing_delivery_lines','cut_defects','wage_ledger','payments','payment_allocations','adjustments','sync_queue','audit_log']; const r = await pool.query('DELETE FROM app_rows WHERE collection=ANY($1)', [cols]); res.json({ message: `Cleared ${r.rowCount} records` });
+});
+
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => console.log(`Server on ${PORT}`));
