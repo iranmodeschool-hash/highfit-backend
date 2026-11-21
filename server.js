@@ -752,5 +752,54 @@ app.delete('/api/admin/clear-all-transactions', auth, async (req, res) => {
   if (req.user.role !== 'admin' && req.user.role !== 'super_admin') return res.status(403).json({ error: 'Admin only' }); const cols = ['dispatches','dispatch_lines','dispatch_size_qty','workshop_receipts','workshop_receipt_lines','sewing_deliveries','sewing_delivery_lines','cut_defects','wage_ledger','payments','payment_allocations','adjustments','sync_queue','audit_log']; const r = await pool.query('DELETE FROM app_rows WHERE collection=ANY($1)', [cols]); res.json({ message: `Cleared ${r.rowCount} records` });
 });
 
+// ===== Store عمومی برای ERP (بدون نیاز به توکن) =====
+app.get('/api/public/store/:collection', async (req, res) => {
+  try {
+    const collection = req.params.collection;
+    const r = await pool.query('SELECT id, json FROM app_rows WHERE collection=$1', [collection]);
+    res.json(r.rows.map(x => safeParse(x.json, x.id)));
+  } catch (err) { 
+    console.error("Public GET Store Error:", err);
+    res.status(500).json({ error: err.message }); 
+  }
+});
+
+app.post('/api/public/store/:collection', async (req, res) => {
+  try {
+    const collection = req.params.collection;
+    let data = req.body;
+    if (!data || Object.keys(data).length === 0) return res.status(400).json({ error: 'سند خالی قابل ثبت نیست.' });
+    
+    if (Array.isArray(data)) {
+      const savedItems = [];
+      for (let item of data) {
+        const id = String(item.id || Date.now() + Math.random());
+        item.id = id;
+        await pool.query('INSERT INTO app_rows (id, collection, json) VALUES ($1,$2,$3) ON CONFLICT (id) DO UPDATE SET json=EXCLUDED.json', [id, collection, JSON.stringify(item)]);
+        savedItems.push(item);
+      }
+      return res.json({ message: 'Saved', data: savedItems });
+    } else {
+      const id = String(data.id || Date.now());
+      data.id = id;
+      await pool.query('INSERT INTO app_rows (id, collection, json) VALUES ($1,$2,$3) ON CONFLICT (id) DO UPDATE SET json=EXCLUDED.json', [id, collection, JSON.stringify(data)]);
+      return res.json({ ...data, message: 'Saved' });
+    }
+  } catch (err) { 
+    console.error("Public POST Store Error:", err);
+    res.status(500).json({ error: err.message }); 
+  }
+});
+
+app.delete('/api/public/store/:collection/:id', async (req, res) => {
+  try { 
+    await pool.query('DELETE FROM app_rows WHERE id=$1 AND collection=$2', [req.params.id, req.params.collection]); 
+    res.json({ message: 'Deleted' }); 
+  } catch (err) { 
+    res.status(500).json({ error: err.message }); 
+  }
+});
+// ===== پایان بخش Store عمومی =====
+
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`Server on ${PORT}`));
