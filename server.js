@@ -800,67 +800,78 @@ app.delete('/api/public/store/:collection/:id', async (req, res) => {
   }
 });
 
-// ===== 🚀 API تجمیع داده‌های دوختیار برای ERP =====
-app.get('/api/public/erp/integration/doakhtyar/sewing-status', async (req, res) => {
-  try {
-    const deliveriesRes = await pool.query(`SELECT id, json FROM app_rows WHERE collection='sewing_deliveries'`);
-    const linesRes = await pool.query(`SELECT id, json FROM app_rows WHERE collection='sewing_delivery_lines'`);
-    
-    const deliveries = deliveriesRes.rows.map(x => safeParse(x.json, x.id));
-    const lines = linesRes.rows.map(x => safeParse(x.json, x.id));
-
-    const approvedDeliveries = deliveries.filter(d => d.status === 'approved' || d.status === 'تایید شده');
-
-    const result = approvedDeliveries.map(d => {
-      const deliveryLines = lines.filter(l => l.delivery_id === d.id || l.deliveryId === d.id);
-      return {
-        id: d.id,
-        date: d.date || d.created_at,
-        workshop_id: d.workshop_id || d.workshopId,
-        status: d.status,
-        items: deliveryLines.map(l => ({
-          product_code: l.product_code || l.code || l.product_name,
-          quantity: l.quantity || l.delivered_qty,
-          size: l.size
-        }))
-      };
-    });
-
-    res.json({ success: true, data: result });
-  } catch (err) {
-    console.error("ERP Integration Error:", err);
-    res.status(500).json({ error: err.message });
-  }
-});
-
-// ===== 🚀 API دریافت حواله‌های ارسال به کارگاه از دوختیار =====
+// ===== 🚀 API تجمیع داده‌های دوختیار برای ERP (نسخه هوشمند با تطبیق کد محصول) =====
 app.get('/api/public/erp/integration/doakhtyar/dispatches', async (req, res) => {
   try {
+    // ۱. خواندن BOMهای ERP برای ساخت دیکشنری
+    const productsRes = await pool.query(`SELECT id, json FROM app_rows WHERE collection='erp_products'`);
+    const products = productsRes.rows.map(x => safeParse(x.json, x.id));
+
+    // ساخت دیکشنری: { "2505": [{ name: "روپوش", alias: "RO2505", sku: "RO-PE-1-..." }] }
+    const productDictionary = {};
+    products.forEach(p => {
+      if (!p.bom || !Array.isArray(p.bom)) return;
+      productDictionary[p.code] = p.bom.map(item => ({
+        name: item.name || item.item_name, // نام کالا مثل روپوش
+        alias: item.alias || item.product_code, // نام مستعار مثل RO2505
+        sku: item.sku
+      }));
+    });
+
+    // ۲. خواندن حواله‌های ارسال از دوختیار
     const headersRes = await pool.query(`SELECT id, json FROM app_rows WHERE collection='dispatches'`);
     const linesRes = await pool.query(`SELECT id, json FROM app_rows WHERE collection='dispatch_lines'`);
     
     const headers = headersRes.rows.map(x => safeParse(x.json, x.id));
     const lines = linesRes.rows.map(x => safeParse(x.json, x.id));
 
+    // ۳. پردازش و تطبیق
     const result = headers.map(h => {
+      // پیدا کردن کد محصول از روی حواله
+      const productCode = h.product_code || h.productCode || h.product_id;
+      
       const dispatchLines = lines.filter(l => l.dispatch_id === h.id || l.dispatchId === h.id);
+      
+      const mappedItems = dispatchLines.map(l => {
+        const itemName = l.name || l.product_name || l.item_name; // نام کالا مثل روپوش
+        let mappedSku = null;
+        let mappedAlias = itemName;
+
+        // اگر کد محصول را داشتیم، در دیکشنری جستجو می‌کنیم
+        if (productCode && productDictionary[productCode]) {
+          const bomItem = productDictionary[productCode].find(x => 
+            (x.name && x.name.includes(itemName)) || // تطبیق بر اساس نام
+            (x.alias && x.alias === itemName)       // تطبیق بر اساس نام مستعار
+          );
+          if (bomItem) {
+            mappedSku = bomItem.sku;
+            mappedAlias = bomItem.alias;
+          }
+        }
+
+        return {
+          product_code: productCode,
+          name: itemName,
+          alias: mappedAlias,
+          sku: mappedSku,
+          quantity: l.quantity || l.qty || 0,
+          size: l.size || 'نامشخص'
+        };
+      });
+
       return {
         id: h.id,
-        serial: h.serial,
+        serial: h.serial || h.doc_no,
         date: h.date || h.created_at,
         workshop_name: h.workshop_name || h.workshopName,
         status: h.status,
-        items: dispatchLines.map(l => ({
-          product_code: l.product_code || l.code,
-          quantity: l.quantity || l.qty,
-          size: l.size
-        }))
+        items: mappedItems
       };
     });
 
     res.json({ success: true, data: result });
   } catch (err) {
-    console.error("Dispatch Integration Error:", err);
+    console.error("ERP Dispatch Integration Error:", err);
     res.status(500).json({ error: err.message });
   }
 });
