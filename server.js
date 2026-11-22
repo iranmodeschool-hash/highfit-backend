@@ -799,7 +799,42 @@ app.delete('/api/public/store/:collection/:id', async (req, res) => {
     res.status(500).json({ error: err.message }); 
   }
 });
-// ===== پایان بخش Store عمومی =====
+
+// ===== 🚀 API تجمیع داده‌های دوختیار برای ERP =====
+app.get('/api/public/erp/integration/doakhtyar/sewing-status', async (req, res) => {
+  try {
+    // خواندن داده‌های تحویل دوخت از دیتابیس
+    const deliveriesRes = await pool.query(`SELECT id, json FROM app_rows WHERE collection='sewing_deliveries'`);
+    const linesRes = await pool.query(`SELECT id, json FROM app_rows WHERE collection='sewing_delivery_lines'`);
+    
+    const deliveries = deliveriesRes.rows.map(x => safeParse(x.json, x.id));
+    const lines = linesRes.rows.map(x => safeParse(x.json, x.id));
+
+    // فیلتر کردن تحویل‌های تایید شده
+    const approvedDeliveries = deliveries.filter(d => d.status === 'approved' || d.status === 'تایید شده');
+
+    const result = approvedDeliveries.map(d => {
+      const deliveryLines = lines.filter(l => l.delivery_id === d.id || l.deliveryId === d.id);
+      return {
+        id: d.id,
+        date: d.date || d.created_at,
+        workshop_id: d.workshop_id || d.workshopId,
+        status: d.status,
+        items: deliveryLines.map(l => ({
+          alias_name: l.product_name || l.alias,
+          quantity: l.quantity || l.delivered_qty,
+          size: l.size
+        }))
+      };
+    });
+
+    res.json({ success: true, data: result });
+  } catch (err) {
+    console.error("ERP Integration Error:", err);
+    res.status(500).json({ error: err.message });
+  }
+});
+// ===== پایان بخش API تجمیع =====
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`Server on ${PORT}`));
