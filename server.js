@@ -803,14 +803,12 @@ app.delete('/api/public/store/:collection/:id', async (req, res) => {
 // ===== 🚀 API تجمیع داده‌های دوختیار برای ERP =====
 app.get('/api/public/erp/integration/doakhtyar/sewing-status', async (req, res) => {
   try {
-    // خواندن داده‌های تحویل دوخت از دیتابیس
     const deliveriesRes = await pool.query(`SELECT id, json FROM app_rows WHERE collection='sewing_deliveries'`);
     const linesRes = await pool.query(`SELECT id, json FROM app_rows WHERE collection='sewing_delivery_lines'`);
     
     const deliveries = deliveriesRes.rows.map(x => safeParse(x.json, x.id));
     const lines = linesRes.rows.map(x => safeParse(x.json, x.id));
 
-    // فیلتر کردن تحویل‌های تایید شده
     const approvedDeliveries = deliveries.filter(d => d.status === 'approved' || d.status === 'تایید شده');
 
     const result = approvedDeliveries.map(d => {
@@ -821,7 +819,7 @@ app.get('/api/public/erp/integration/doakhtyar/sewing-status', async (req, res) 
         workshop_id: d.workshop_id || d.workshopId,
         status: d.status,
         items: deliveryLines.map(l => ({
-          product_code: l.product_code || l.code || l.product_name, // در دوختیار این فیلد به عنوان کد کالا شناخته می‌شود
+          product_code: l.product_code || l.code || l.product_name,
           quantity: l.quantity || l.delivered_qty,
           size: l.size
         }))
@@ -834,6 +832,39 @@ app.get('/api/public/erp/integration/doakhtyar/sewing-status', async (req, res) 
     res.status(500).json({ error: err.message });
   }
 });
+
+// ===== 🚀 API دریافت حواله‌های ارسال به کارگاه از دوختیار =====
+app.get('/api/public/erp/integration/doakhtyar/dispatches', async (req, res) => {
+  try {
+    const headersRes = await pool.query(`SELECT id, json FROM app_rows WHERE collection='dispatches'`);
+    const linesRes = await pool.query(`SELECT id, json FROM app_rows WHERE collection='dispatch_lines'`);
+    
+    const headers = headersRes.rows.map(x => safeParse(x.json, x.id));
+    const lines = linesRes.rows.map(x => safeParse(x.json, x.id));
+
+    const result = headers.map(h => {
+      const dispatchLines = lines.filter(l => l.dispatch_id === h.id || l.dispatchId === h.id);
+      return {
+        id: h.id,
+        serial: h.serial,
+        date: h.date || h.created_at,
+        workshop_name: h.workshop_name || h.workshopName,
+        status: h.status,
+        items: dispatchLines.map(l => ({
+          product_code: l.product_code || l.code,
+          quantity: l.quantity || l.qty,
+          size: l.size
+        }))
+      };
+    });
+
+    res.json({ success: true, data: result });
+  } catch (err) {
+    console.error("Dispatch Integration Error:", err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // ===== پایان بخش API تجمیع =====
 
 const PORT = process.env.PORT || 3000;
