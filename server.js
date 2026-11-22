@@ -800,7 +800,33 @@ app.delete('/api/public/store/:collection/:id', async (req, res) => {
   }
 });
 
-// ===== 🚀 API خواندن داده‌های مشترک حواله‌ها (برای ERP) =====
+// ===== مسیر اختصاصی و امن برای ذخیره حواله‌های مشترک =====
+app.post('/api/public/shared/dispatches', async (req, res) => {
+  try {
+    const data = req.body;
+    if (!Array.isArray(data)) {
+      return res.status(400).json({ error: 'داده‌ها باید آرایه باشند' });
+    }
+    
+    const savedItems = [];
+    for (const item of data) {
+      const id = String(item.id || Date.now() + Math.random());
+      item.id = id;
+      await pool.query(
+        'INSERT INTO app_rows (id, collection, json) VALUES ($1,$2,$3) ON CONFLICT (id) DO UPDATE SET json=EXCLUDED.json',
+        [id, 'shared_dispatches', JSON.stringify(item)]
+      );
+      savedItems.push(item);
+    }
+    
+    res.json({ success: true, count: savedItems.length });
+  } catch (err) {
+    console.error("Shared Dispatch Save Error:", err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ===== API خواندن داده‌های مشترک حواله‌ها (برای ERP) =====
 app.get('/api/public/shared/dispatches', async (req, res) => {
   try {
     const r = await pool.query('SELECT id, json FROM app_rows WHERE collection=$1', ['shared_dispatches']);
