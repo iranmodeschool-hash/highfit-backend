@@ -821,7 +821,7 @@ app.get('/api/public/erp/integration/doakhtyar/sewing-status', async (req, res) 
         workshop_id: d.workshop_id || d.workshopId,
         status: d.status,
         items: deliveryLines.map(l => ({
-          alias_name: l.product_name || l.alias,
+          product_code: l.product_code || l.code || l.product_name, // در دوختیار این فیلد به عنوان کد کالا شناخته می‌شود
           quantity: l.quantity || l.delivered_qty,
           size: l.size
         }))
