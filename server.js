@@ -463,4 +463,379 @@ app.get('/api/store/:collection', auth, async (req, res) => {
       if (collection === 'crm_schools') {
         const assigned = parseJsonArray(req.user.assigned_schools);
         if (assigned.length > 0) {
-          query += ` AND (json->>'id' = ANY($2) OR json->>'ownerId' = $3)
+          query += ` AND (json->>'id' = ANY($2) OR json->>'ownerId' = $3)`;
+          params.push(assigned, userId);
+        } else {
+          query += ` AND json->>'ownerId' = $2`;
+          params.push(userId);
+        }
+      } else if (collection === 'crm_contracts') {
+        query += ` AND json->>'ownerId' = $2`;
+        params.push(userId);
+      } else if (collection === 'crm_opportunities') {
+        query += ` AND (json->>'ownerId' = $2)`;
+        params.push(userId);
+      }
+    }
+
+    const r = await pool.query(query, params);
+    res.json(r.rows.map(x => safeParse(x.json, x.id)));
+  } catch (err) { 
+    console.error("GET Store Error:", err);
+    res.status(500).json({ error: err.message }); 
+  }
+});
+
+app.post('/api/store/:collection', auth, async (req, res) => {
+  try {
+    const collection = req.params.collection;
+    let data = req.body;
+    if (!data || Object.keys(data).length === 0) return res.status(400).json({ error: 'سند خالی قابل ثبت نیست.' });
+    if (typeof data === 'string') { try { data = JSON.parse(data); } catch (e) { return res.status(400).json({ error: 'فرمت داده نامعتبر است' }); } }
+
+    if (Array.isArray(data)) {
+      const savedItems = [];
+      for (let item of data) {
+        const id = String(item.id || Date.now() + Math.random());
+        item.id = id;
+        await pool.query('INSERT INTO app_rows (id, collection, json) VALUES ($1,$2,$3) ON CONFLICT (id) DO UPDATE SET json=EXCLUDED.json', [id, collection, JSON.stringify(item)]);
+        savedItems.push(item);
+      }
+      return res.json({ message: 'Saved', data: savedItems });
+    } else {
+      const id = String(data.id || Date.now());
+      data.id = id;
+      await pool.query('INSERT INTO app_rows (id, collection, json) VALUES ($1,$2,$3) ON CONFLICT (id) DO UPDATE SET json=EXCLUDED.json', [id, collection, JSON.stringify(data)]);
+      return res.json({ ...data, message: 'Saved' });
+    }
+  } catch (err) { 
+    console.error("POST Store Error:", err);
+    res.status(500).json({ error: err.message }); 
+  }
+});
+
+// مسیر عمومی ثبت درخواست عضویت (بدون نیاز به لاگین)
+app.post('/api/public/register-request', async (req, res) => {
+  try {
+    const { fullName, email, mobile, position, schoolName, password } = req.body;
+    if (!fullName || !email || !password) return res.status(400).json({ error: 'اطلاعات ناقص است' });
+    
+    const existing = await pool.query(
+      `SELECT id FROM app_rows WHERE collection='crm_membership_requests' AND json->>'email' = $1 AND json->>'status' = 'pending'`, 
+      [email]
+    );
+    if (existing.rows.length > 0) return res.status(400).json({ error: 'درخواست قبلی برای این ایمیل در انتظار بررسی است' });
+
+    const id = 'req_' + Date.now() + '_' + Math.random().toString(36).substring(7);
+    const data = { id, fullName, email, mobile, position, schoolName, password, status: 'pending', createdAt: new Date().toISOString() };
+    
+    await pool.query('INSERT INTO app_rows (id, collection, json) VALUES ($1,$2,$3)', [id, 'crm_membership_requests', JSON.stringify(data)]);
+    res.status(201).json({ message: 'Request submitted successfully', id });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.delete('/api/store/:collection/bulk', auth, async (req, res) => {
+  try {
+    const collection = req.params.collection;
+    const { school } = req.query;
+    
+    if (!school) return res.status(400).json({ error: 'نام مدرسه یا ALL الزامی است.' });
+    if (req.user.role !== 'admin' && req.user.role !== 'super_admin') return res.status(403).json({ error: 'فقط مدیر کل مجاز است.' });
+
+    if (school === 'ALL') {
+      await pool.query(`DELETE FROM app_rows WHERE collection=$1`, [collection]);
+    } else {
+      await pool.query(`DELETE FROM app_rows WHERE collection=$1 AND (json->>'school' = $2 OR json->>'workshop_id' = $2)`, [collection, school]);
+    }
+    
+    res.json({ message: 'Bulk delete successful' });
+  } catch (err) { 
+    console.error("Bulk Delete Error:", err);
+    res.status(500).json({ error: err.message }); 
+  }
+});
+
+app.delete('/api/store/:collection/:id', auth, async (req, res) => {
+  try { await pool.query('DELETE FROM app_rows WHERE id=$1', [req.params.id]); res.json({ message: 'Deleted' }); }
+  catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// ===== تنظیمات (لینک بروزرسانی) =====
+app.post('/api/settings/update-link', auth, async (req, res) => {
+  try {
+    const { url, app_name } = req.body;
+    if (!url || !app_name) return res.status(400).json({ error: 'URL و app_name الزامی هستند.' });
+    
+    const id = `update_link_${app_name}`;
+    await pool.query(
+      'INSERT INTO app_rows (id, collection, json) VALUES ($1,$2,$3) ON CONFLICT (id) DO UPDATE SET json=EXCLUDED.json',
+      [id, 'app_settings', JSON.stringify({ id, url, app_name, updated_at: new Date().toISOString() })]
+    );
+    
+    res.json({ message: 'Saved', url });
+  } catch (err) {
+    console.error("Save Update Link Error:", err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get('/api/settings/update-link/:app_name', auth, async (req, res) => {
+  try {
+    const { app_name } = req.params;
+    const id = `update_link_${app_name}`;
+    const r = await pool.query('SELECT json FROM app_rows WHERE id=$1', [id]);
+    if (!r.rows.length) return res.json({ url: null });
+    const data = safeParse(r.rows[0].json);
+    res.json({ url: data.url || null });
+  } catch (err) {
+    console.error("Get Update Link Error:", err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ===== 🔔 اعلان‌ها (خلاصه برای Badge) =====
+app.get('/api/notifications/summary', auth, async (req, res) => {
+  try {
+    const myId = String(req.user.id);
+    const appName = req.user.app_name;
+    
+    const msgResult = await pool.query(
+      `SELECT COUNT(*) FROM app_rows m
+       WHERE m.collection='messages' 
+       AND m.json->>'receiver_id' = $1 
+       AND m.json->>'status' != 'seen'
+       AND EXISTS (
+         SELECT 1 FROM users u 
+         WHERE u.id::text = m.json->>'sender_id' 
+         AND u.app_name = $2
+       )`,
+      [myId, appName]
+    );
+    const chatUnread = parseInt(msgResult.rows[0].count) || 0;
+    
+    let pendingCount = 0;
+    
+    if (appName === 'size_negar' && (req.user.role === 'admin' || req.user.role === 'supervisor')) {
+      const r = await pool.query(`SELECT COUNT(*) FROM app_rows WHERE collection='size_negar_orders' AND json->>'status' = 'pending'`);
+      pendingCount = parseInt(r.rows[0].count) || 0;
+    } else if (appName === 'petty_cash' && (req.user.role === 'admin' || req.user.role === 'financial_manager')) {
+      const r = await pool.query(`SELECT COUNT(*) FROM app_rows WHERE collection='petty_cash_payments' AND json->>'status' = 'pending'`);
+      pendingCount = parseInt(r.rows[0].count) || 0;
+    }
+    
+    res.json({ chatUnread, pendingCount, total: chatUnread + pendingCount });
+  } catch (err) { 
+    console.error("Notification Summary Error:", err);
+    res.status(500).json({ error: err.message }); 
+  }
+});
+
+// ===== آمار داشبورد =====
+app.get('/api/dashboard/stats', auth, async (req, res) => {
+  let response = { users: 0, workshops: 0, products: 0, dispatches: 0, deliveries: 0, defects: 0, total_wage: 0 };
+  try {
+    const isAdmin = req.user.role === 'admin' || req.user.role === 'super_admin';
+    const wid = req.user.workshop_id;
+    const filter = !isAdmin && wid ? ` AND (json->>'workshop_id' = '${wid}' OR json->>'workshopId' = '${wid}')` : '';
+    if (isAdmin) { const u = await pool.query('SELECT COUNT(*) FROM users WHERE app_name=$1', [req.user.app_name]); response.users = parseInt(u.rows[0].count) || 0; }
+    const w = await pool.query(`SELECT COUNT(*) FROM app_rows WHERE collection='workshops'${filter}`); response.workshops = parseInt(w.rows[0].count) || 0;
+    const p = await pool.query(`SELECT COUNT(*) FROM app_rows WHERE collection='products'${filter}`); response.products = parseInt(p.rows[0].count) || 0;
+    const d = await pool.query(`SELECT COUNT(*) FROM app_rows WHERE collection='dispatches'${filter}`); response.dispatches = parseInt(d.rows[0].count) || 0;
+    const dl = await pool.query(`SELECT COUNT(*) FROM app_rows WHERE collection='sewing_deliveries'${filter}`); response.deliveries = parseInt(dl.rows[0].count) || 0;
+    const df = await pool.query(`SELECT COUNT(*) FROM app_rows WHERE collection='cut_defects'${filter}`); response.defects = parseInt(df.rows[0].count) || 0;
+  } catch (err) { console.error("Dashboard Stats Error:", err); }
+  res.json(response);
+});
+
+// ===== چت =====
+app.post('/api/chat/send', auth, async (req, res) => {
+  const { receiver_id, text, image, audio } = req.body;
+  if (!receiver_id || (!text && !image && !audio)) return res.status(400).json({ error: 'Missing' });
+  const id = 'msg_' + Date.now() + '_' + Math.random().toString(36).substring(7); 
+  const data = { id, sender_id: req.user.id, receiver_id, text: text || '', image: image || null, audio: audio || null, status: 'sent', app_name: req.user.app_name, created_at: new Date().toISOString() };
+  try { await pool.query('INSERT INTO app_rows (id, collection, json) VALUES ($1,$2,$3)', [id, 'messages', JSON.stringify(data)]); res.status(201).json(data); }
+  catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.get('/api/chat/messages/:contactId', auth, async (req, res) => {
+  const myId = req.user.id, cid = req.params.contactId;
+  const appName = req.user.app_name;
+  try {
+    await pool.query(
+      `UPDATE app_rows SET json=jsonb_set(json,'{status}','"delivered"') 
+       WHERE collection='messages' 
+       AND json->>'sender_id'=$1 
+       AND json->>'receiver_id'=$2 
+       AND json->>'status'='sent'
+       AND json->>'app_name'=$3`, 
+      [cid, myId, appName]
+    );
+    const r = await pool.query(
+      `SELECT id, json FROM app_rows 
+       WHERE collection='messages' 
+       AND json->>'app_name'=$3
+       AND (
+         (json->>'sender_id'=$1 AND json->>'receiver_id'=$2) 
+         OR (json->>'sender_id'=$2 AND json->>'receiver_id'=$1)
+       ) 
+       ORDER BY (json->>'created_at') ASC`, 
+      [myId, cid, appName]
+    );
+    res.json(r.rows.map(x => safeParse(x.json, x.id)));
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.put('/api/chat/seen/:contactId', auth, async (req, res) => {
+  try {
+    await pool.query(
+      `UPDATE app_rows SET json=jsonb_set(json,'{status}','"seen"') 
+       WHERE collection='messages' 
+       AND json->>'sender_id'=$1 
+       AND json->>'receiver_id'=$2 
+       AND json->>'app_name'=$3
+       AND json->>'status' IN ('sent','delivered')`, 
+      [req.params.contactId, req.user.id, req.user.app_name]
+    ); 
+    res.json({ message: 'Seen' });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.delete('/api/chat/messages/:messageId', auth, async (req, res) => {
+  try {
+    const check = await pool.query(`SELECT id, json FROM app_rows WHERE id=$1 AND collection='messages'`, [req.params.messageId]);
+    if (!check.rows.length) return res.status(404).json({ error: 'Not found' });
+    const msg = safeParse(check.rows[0].json, check.rows[0].id);
+    if (msg.sender_id !== req.user.id) return res.status(403).json({ error: 'You can only delete your own messages' });
+    await pool.query('DELETE FROM app_rows WHERE id=$1', [req.params.messageId]);
+    res.json({ message: 'Deleted' });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.put('/api/chat/messages/:messageId', auth, async (req, res) => {
+  try {
+    const { text } = req.body;
+    const check = await pool.query(`SELECT id, json FROM app_rows WHERE id=$1 AND collection='messages'`, [req.params.messageId]);
+    if (!check.rows.length) return res.status(404).json({ error: 'Not found' });
+    const msg = safeParse(check.rows[0].json, check.rows[0].id);
+    if (msg.sender_id !== req.user.id) return res.status(403).json({ error: 'You can only edit your own messages' });
+    msg.text = text;
+    await pool.query('UPDATE app_rows SET json=$1 WHERE id=$2', [JSON.stringify(msg), req.params.messageId]);
+    res.json({ message: 'Updated', data: msg });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.get('/api/chat/contacts', auth, async (req, res) => {
+  try {
+    const targetApp = req.user.app_name || 'doakhtyar';
+    let q = 'SELECT id, username, role, workshop_id FROM users WHERE app_name=$1', p = [targetApp]; 
+    if (req.user.role !== 'admin' && req.user.role !== 'super_admin') { q += ' AND role=$2'; p.push('admin'); } 
+    const r = await pool.query(q, p); 
+    res.json(r.rows.map(u => ({ ...u, role: targetApp === 'doakhtyar' ? toDoakhtyarRole(u.role) : targetApp === 'highfit_crm' ? toCrmRole(u.role) : toPettyCashRole(u.role) })));
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// ===== Reset =====
+app.delete('/api/admin/reset-workshop/:workshopId', auth, async (req, res) => {
+  if (req.user.role !== 'admin' && req.user.role !== 'super_admin') return res.status(403).json({ error: 'Admin only' }); const wid = req.params.workshopId; const cols = ['dispatches','sewing_deliveries','wage_ledger','payments'];
+  try {
+    const dR = await pool.query(`SELECT id FROM app_rows WHERE collection='dispatches' AND (json->>'workshop_id'=$1 OR json->>'workshopId'=$1)`, [wid]); const dIds = dR.rows.map(r => r.id);
+    const sR = await pool.query(`SELECT id FROM app_rows WHERE collection='sewing_deliveries' AND (json->>'workshop_id'=$1 OR json->>'workshopId'=$1)`, [wid]); const sIds = sR.rows.map(r => r.id);
+    if (dIds.length) await pool.query(`DELETE FROM app_rows WHERE collection IN ('dispatch_lines','workshop_receipts','cut_defects','dispatch_size_qty') AND (json->>'dispatch_id'=ANY($1) OR json->>'dispatchId'=ANY($1))`, [dIds]);
+    if (sIds.length) await pool.query(`DELETE FROM app_rows WHERE collection IN ('sewing_delivery_lines') AND (json->>'delivery_id'=ANY($1) OR json->>'deliveryId'=ANY($1))`, [sIds]);
+    await pool.query(`DELETE FROM app_rows WHERE collection=ANY($1) AND (json->>'workshop_id'=$2 OR json->>'workshopId'=$2)`, [cols, wid]); res.json({ message: 'Reset complete' });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.delete('/api/admin/clear-all-transactions', auth, async (req, res) => {
+  if (req.user.role !== 'admin' && req.user.role !== 'super_admin') return res.status(403).json({ error: 'Admin only' }); const cols = ['dispatches','dispatch_lines','dispatch_size_qty','workshop_receipts','workshop_receipt_lines','sewing_deliveries','sewing_delivery_lines','cut_defects','wage_ledger','payments','payment_allocations','adjustments','sync_queue','audit_log']; const r = await pool.query('DELETE FROM app_rows WHERE collection=ANY($1)', [cols]); res.json({ message: `Cleared ${r.rowCount} records` });
+});
+
+// ===== Store عمومی برای ERP (بدون نیاز به توکن) =====
+app.get('/api/public/store/:collection', async (req, res) => {
+  try {
+    const collection = req.params.collection;
+    const r = await pool.query('SELECT id, json FROM app_rows WHERE collection=$1', [collection]);
+    res.json(r.rows.map(x => safeParse(x.json, x.id)));
+  } catch (err) { 
+    console.error("Public GET Store Error:", err);
+    res.status(500).json({ error: err.message }); 
+  }
+});
+
+app.post('/api/public/store/:collection', async (req, res) => {
+  try {
+    const collection = req.params.collection;
+    let data = req.body;
+    if (!data || Object.keys(data).length === 0) return res.status(400).json({ error: 'سند خالی قابل ثبت نیست.' });
+    
+    if (Array.isArray(data)) {
+      const savedItems = [];
+      for (let item of data) {
+        const id = String(item.id || Date.now() + Math.random());
+        item.id = id;
+        await pool.query('INSERT INTO app_rows (id, collection, json) VALUES ($1,$2,$3) ON CONFLICT (id) DO UPDATE SET json=EXCLUDED.json', [id, collection, JSON.stringify(item)]);
+        savedItems.push(item);
+      }
+      return res.json({ message: 'Saved', data: savedItems });
+    } else {
+      const id = String(data.id || Date.now());
+      data.id = id;
+      await pool.query('INSERT INTO app_rows (id, collection, json) VALUES ($1,$2,$3) ON CONFLICT (id) DO UPDATE SET json=EXCLUDED.json', [id, collection, JSON.stringify(data)]);
+      return res.json({ ...data, message: 'Saved' });
+    }
+  } catch (err) { 
+    console.error("Public POST Store Error:", err);
+    res.status(500).json({ error: err.message }); 
+  }
+});
+
+app.delete('/api/public/store/:collection/:id', async (req, res) => {
+  try { 
+    await pool.query('DELETE FROM app_rows WHERE id=$1 AND collection=$2', [req.params.id, req.params.collection]); 
+    res.json({ message: 'Deleted' }); 
+  } catch (err) { 
+    res.status(500).json({ error: err.message }); 
+  }
+});
+
+// ===== مسیر اختصاصی و امن برای ذخیره حواله‌های مشترک =====
+app.post('/api/public/shared/dispatches', async (req, res) => {
+  try {
+    const data = req.body;
+    if (!Array.isArray(data)) {
+      return res.status(400).json({ error: 'داده‌ها باید آرایه باشند' });
+    }
+    
+    const savedItems = [];
+    for (const item of data) {
+      const id = String(item.id || Date.now() + Math.random());
+      item.id = id;
+      await pool.query(
+        'INSERT INTO app_rows (id, collection, json) VALUES ($1,$2,$3) ON CONFLICT (id) DO UPDATE SET json=EXCLUDED.json',
+        [id, 'shared_dispatches', JSON.stringify(item)]
+      );
+      savedItems.push(item);
+    }
+    
+    res.json({ success: true, count: savedItems.length });
+  } catch (err) {
+    console.error("Shared Dispatch Save Error:", err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ===== API خواندن داده‌های مشترک حواله‌ها (برای ERP) =====
+app.get('/api/public/shared/dispatches', async (req, res) => {
+  try {
+    const r = await pool.query('SELECT id, json FROM app_rows WHERE collection=$1', ['shared_dispatches']);
+    res.json(r.rows.map(x => safeParse(x.json, x.id)));
+  } catch (err) {
+    console.error("Shared Dispatches Error:", err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => console.log(`Server on ${PORT}`));
