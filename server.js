@@ -42,6 +42,7 @@ const createTables = async () => {
         assigned_schools JSONB DEFAULT '[]'::jsonb,
         assigned_products JSONB DEFAULT '[]'::jsonb,
         allowed_apps JSONB DEFAULT '["doakhtyar"]'::jsonb, 
+        app_roles JSONB DEFAULT '{}'::jsonb,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       );
     `);
@@ -50,6 +51,7 @@ const createTables = async () => {
     await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS assigned_products JSONB DEFAULT '[]'::jsonb;`);
     await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS mobile VARCHAR(20);`);
     await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS position VARCHAR(100);`);
+    await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS app_roles JSONB DEFAULT '{}'::jsonb;`);
     
     await pool.query(`
       DO $$ BEGIN
@@ -96,6 +98,12 @@ const parseJsonArray = (arr) => {
   return Array.isArray(parsed) ? parsed : [];
 };
 
+const parseJsonObject = (obj) => {
+  let parsed = obj;
+  if (typeof parsed === 'string') { try { parsed = JSON.parse(parsed); } catch(e) { parsed = {}; } }
+  return (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) ? parsed : {};
+};
+
 const toDbRole = (role) => {
   if (!role) return 'clerk';
   const r = role.toString().trim().toLowerCase();
@@ -133,19 +141,30 @@ app.get('/api/force-create-admin', async (req, res) => {
   const { email, password } = req.query;
   try {
     const hashed = await bcrypt.hash(password, 10);
-    const appsList = JSON.stringify(["doakhtyar","petty_cash","size_negar","highfit_crm","highfit_web","erp"]);
+    const appsListArray = (process.env.ALLOWED_APPS || "doakhtyar,petty_cash,size_negar,highfit_crm,highfit_web,erp").split(',').map(a => a.trim());
+    const appsList = JSON.stringify(appsListArray);
     
-    // ساخت ادمین برای 5 اپ قبلی
-    await pool.query(`INSERT INTO users (username, email, password_hash, role, app_name, allowed_apps) VALUES ($1,$2,$3,$4,$5,$6) ON CONFLICT (app_name, email) DO UPDATE SET password_hash = EXCLUDED.password_hash, role = 'admin'`, ['HAMID', email, hashed, 'admin', 'doakhtyar', appsList]);
-    await pool.query(`INSERT INTO users (username, email, password_hash, role, app_name, allowed_apps) VALUES ($1,$2,$3,$4,$5,$6) ON CONFLICT (app_name, email) DO UPDATE SET password_hash = EXCLUDED.password_hash, role = 'admin'`, ['HAMID', email, hashed, 'admin', 'petty_cash', appsList]);
-    await pool.query(`INSERT INTO users (username, email, password_hash, role, app_name, allowed_apps) VALUES ($1,$2,$3,$4,$5,$6) ON CONFLICT (app_name, email) DO UPDATE SET password_hash = EXCLUDED.password_hash, role = 'admin'`, ['HAMID', email, hashed, 'admin', 'size_negar', appsList]);
-    await pool.query(`INSERT INTO users (username, email, password_hash, role, app_name, allowed_apps) VALUES ($1,$2,$3,$4,$5,$6) ON CONFLICT (app_name, email) DO UPDATE SET password_hash = EXCLUDED.password_hash, role = 'admin'`, ['HAMID', email, hashed, 'admin', 'highfit_crm', appsList]);
-    await pool.query(`INSERT INTO users (username, email, password_hash, role, app_name, allowed_apps) VALUES ($1,$2,$3,$4,$5,$6) ON CONFLICT (app_name, email) DO UPDATE SET password_hash = EXCLUDED.password_hash, role = 'admin'`, ['HAMID', email, hashed, 'admin', 'highfit_web', appsList]);
+    // ساخت ادمین برای 5 اپ معمولی
+    for (const appName of appsListArray) {
+      if (appName === 'erp') continue;
+      await pool.query(
+        `INSERT INTO users (username, email, password_hash, role, app_name, allowed_apps) 
+         VALUES ($1,$2,$3,$4,$5,$6) 
+         ON CONFLICT (app_name, email) DO UPDATE SET password_hash = EXCLUDED.password_hash, role = 'admin'`, 
+        ['HAMID', email, hashed, 'admin', appName, appsList]
+      );
+    }
     
-    // **ساخت ادمین برای ERP**
-    await pool.query(`INSERT INTO users (username, email, password_hash, role, app_name, allowed_apps) VALUES ($1,$2,$3,$4,$5,$6) ON CONFLICT (app_name, email) DO UPDATE SET password_hash = EXCLUDED.password_hash, role = 'admin'`, ['HAMID', email, hashed, 'admin', 'erp', appsList]);
+    // ساخت ادمین برای ERP با نقش‌های کامل
+    const erpAppRoles = { "doakhtyar": "admin", "petty_cash": "admin", "size_negar": "admin", "highfit_crm": "admin" };
+    await pool.query(
+      `INSERT INTO users (username, email, password_hash, role, app_name, allowed_apps, app_roles) 
+       VALUES ($1,$2,$3,$4,$5,$6,$7) 
+       ON CONFLICT (app_name, email) DO UPDATE SET password_hash = EXCLUDED.password_hash, role = 'admin', app_roles = EXCLUDED.app_roles`, 
+      ['HAMID', email, hashed, 'admin', 'erp', appsList, JSON.stringify(erpAppRoles)]
+    );
     
-    res.send('Admin accounts created/reset for all 5 apps + ERP.');
+    res.send(`Admin accounts created/reset for apps: ${appsListArray.join(', ')}`);
   } catch (err) { res.status(500).send(err.message); }
 });
 
@@ -170,6 +189,7 @@ app.post('/api/login', async (req, res) => {
       role: responseRole, 
       workshop_id: u.workshop_id, 
       app_name: targetApp,
+      app_roles: parseJsonObject(u.app_roles),
       assigned_schools: parseJsonArray(u.assigned_schools),
       assigned_products: parseJsonArray(u.assigned_products)
     }, process.env.JWT_SECRET || 'super-secret-key', { expiresIn: '1d' });
@@ -184,6 +204,7 @@ app.post('/api/login', async (req, res) => {
         workshop_id: u.workshop_id, 
         mobile: u.mobile,
         position: u.position,
+        app_roles: parseJsonObject(u.app_roles),
         assigned_schools: parseJsonArray(u.assigned_schools),
         assigned_products: parseJsonArray(u.assigned_products),
         allowed_apps: parseJsonArray(u.allowed_apps) 
@@ -440,6 +461,80 @@ app.delete('/api/crm/users/:id', auth, async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
+// ===== مدیریت کاربران (ERP - جدید) =====
+app.get('/api/erp/users', auth, async (req, res) => {
+  if (req.user.app_name !== 'erp' || req.user.role !== 'admin') return res.status(403).json({ error: 'ERP Admin only' });
+  try {
+    const r = await pool.query('SELECT id, username, email, role, mobile, position, app_roles, allowed_apps, created_at FROM users WHERE app_name = $1 ORDER BY id DESC', ['erp']);
+    res.json(r.rows.map(u => ({ 
+      ...u, 
+      app_roles: parseJsonObject(u.app_roles),
+      allowed_apps: parseJsonArray(u.allowed_apps)
+    })));
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.post('/api/erp/users', auth, async (req, res) => {
+  if (req.user.app_name !== 'erp' || req.user.role !== 'admin') return res.status(403).json({ error: 'ERP Admin only' });
+  const { username, email, password, role, mobile, position, app_roles } = req.body;
+  try {
+    const hashed = await bcrypt.hash(password, 10);
+    const rolesObj = parseJsonObject(app_roles);
+    const appsList = Object.keys(rolesObj).filter(k => rolesObj[k] !== 'none' && rolesObj[k] !== '');
+    if (!appsList.includes('erp')) appsList.push('erp');
+    
+    const r = await pool.query(
+      'INSERT INTO users (username, email, password_hash, role, mobile, position, app_roles, allowed_apps, app_name) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING id, username, email, role, mobile, position, app_roles, allowed_apps', 
+      [username || email.split('@')[0], email, hashed, role || 'clerk', mobile || null, position || null, JSON.stringify(rolesObj), JSON.stringify(appsList), 'erp']
+    );
+    res.status(201).json({ ...r.rows[0], app_roles: rolesObj, allowed_apps: appsList });
+  } catch (err) { 
+    if (err.code === '23505') return res.status(400).json({ error: 'این ایمیل یا نام کاربری قبلا ثبت شده است.' });
+    res.status(500).json({ error: err.message }); 
+  }
+});
+
+app.put('/api/erp/users/:id', auth, async (req, res) => {
+  if (req.user.app_name !== 'erp' || req.user.role !== 'admin') return res.status(403).json({ error: 'ERP Admin only' });
+  const { username, email, role, mobile, position, password, app_roles } = req.body;
+  try {
+    const existing = await pool.query('SELECT * FROM users WHERE id=$1 AND app_name=$2', [req.params.id, 'erp']);
+    if (!existing.rows.length) return res.status(404).json({ error: 'User not found' });
+    const u = existing.rows[0];
+    
+    const finalUsername = username !== undefined ? username : u.username;
+    const finalEmail = email !== undefined ? email : u.email;
+    const finalRole = role !== undefined ? role : u.role;
+    const finalMobile = mobile !== undefined ? mobile : u.mobile;
+    const finalPosition = position !== undefined ? position : u.position;
+    const rolesObj = app_roles !== undefined ? parseJsonObject(app_roles) : parseJsonObject(u.app_roles);
+    const appsList = Object.keys(rolesObj).filter(k => rolesObj[k] !== 'none' && rolesObj[k] !== '');
+    if (!appsList.includes('erp')) appsList.push('erp');
+    
+    if (password && password.trim() !== '') {
+      const hashed = await bcrypt.hash(password, 10);
+      await pool.query('UPDATE users SET username=$1, email=$2, role=$3, mobile=$4, position=$5, app_roles=$6, allowed_apps=$7, password_hash=$8 WHERE id=$9 AND app_name=$10', 
+        [finalUsername, finalEmail, finalRole, finalMobile, finalPosition, JSON.stringify(rolesObj), JSON.stringify(appsList), hashed, req.params.id, 'erp']);
+    } else {
+      await pool.query('UPDATE users SET username=$1, email=$2, role=$3, mobile=$4, position=$5, app_roles=$6, allowed_apps=$7 WHERE id=$8 AND app_name=$9', 
+        [finalUsername, finalEmail, finalRole, finalMobile, finalPosition, JSON.stringify(rolesObj), JSON.stringify(appsList), req.params.id, 'erp']);
+    }
+    res.json({ message: 'Updated' });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.delete('/api/erp/users/:id', auth, async (req, res) => {
+  if (req.user.app_name !== 'erp' || req.user.role !== 'admin') return res.status(403).json({ error: 'ERP Admin only' });
+  try {
+    const check = await pool.query('SELECT * FROM users WHERE id=$1 AND app_name=$2', [req.params.id, 'erp']);
+    if (!check.rows.length) return res.status(404).json({ error: 'User not found' });
+    if (check.rows[0].email === 'iranmodeschool@gmail.com') return res.status(403).json({ error: 'مدیر اصلی قابل حذف نیست' });
+    
+    await pool.query('DELETE FROM users WHERE id=$1 AND app_name=$2', [req.params.id, 'erp']);
+    res.json({ message: 'Deleted' });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
 // ===== Store عمومی =====
 app.get('/api/store/:collection', auth, async (req, res) => {
   try {
@@ -518,7 +613,6 @@ app.post('/api/store/:collection', auth, async (req, res) => {
   }
 });
 
-// مسیر عمومی ثبت درخواست عضویت (بدون نیاز به لاگین)
 app.post('/api/public/register-request', async (req, res) => {
   try {
     const { fullName, email, mobile, position, schoolName, password } = req.body;
